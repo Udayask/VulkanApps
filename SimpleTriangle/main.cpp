@@ -289,14 +289,14 @@ void Harmony::CreateDevice() {
     VkDeviceCreateInfo dCreateInfo{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         nullptr,
-        0,
+        0,            // no flags
         1,
-        &qCreateInfo,
+        &qCreateInfo, // single queue
         0,
-        nullptr,
+        nullptr,      // deprecated
         0,
-        nullptr,
-        nullptr
+        nullptr,      // no device extensions yet  
+        nullptr       // default features 
     };
 
     result = vkCreateDevice(physicalDevice, &dCreateInfo, nullptr, &device);
@@ -320,20 +320,11 @@ void Harmony::DestroyInstance() {
     vkDestroyInstance(instance, nullptr);
 }
 
-
-
-
-
-
-
-
-
-
 static void MakeConsole() {
     AllocConsole();
 
-    FILE* fDummy;
-    freopen_s(&fDummy, "CONIN$", "r", stdin);
+    FILE* fDummy = nullptr;
+    freopen_s(&fDummy, "CONIN$",  "r",  stdin);
     freopen_s(&fDummy, "CONOUT$", "w", stderr);
     freopen_s(&fDummy, "CONOUT$", "w", stdout);
 }
