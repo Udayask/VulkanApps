@@ -169,6 +169,10 @@ void Harmony::Run() {
 
 void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
+        DestroyImageViews();
+
+        DestroySwapChain();
+
         DestroyLogicalDevice();
 
         DestroySurface();
