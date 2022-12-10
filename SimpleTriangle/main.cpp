@@ -5,14 +5,22 @@
 #include <iostream>
 #include <vector>
 #include <optional>
+#include <algorithm>
 #include <map>
 
 #define APPLICATION_NAME        "SimpleTriangle"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region ClassDecl
 class alignas(64) Harmony {
 public:
+    bool Init(HINSTANCE instance);
+    void Run();
+    void Shutdown(HINSTANCE instance);
+
+private:
     struct QueueFamilyIndices {
         std::optional<uint32_t>  graphicsFamily;
         std::optional<uint32_t>  computeFamily;
@@ -24,68 +32,31 @@ public:
         }
     };
 
-    struct SwapChain {
-    private:
-        VkInstance          instance;
-        VkPhysicalDevice    physDevice;
-        VkDevice            device;
+    struct SurfaceCaps {
+        using SurfaceFormatKHRVec = std::vector<VkSurfaceFormatKHR>;
+        using PresentModeKHRVec   = std::vector<VkPresentModeKHR>;
 
-        PFN_vkGetPhysicalDeviceSurfaceSupportKHR        pfnVkGetPhysicalDeviceSurfaceSupportKHR;
-        PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR   pfnVkGetPhysicalDeviceSurfaceCapabilitiesKHR;
-        PFN_vkGetPhysicalDeviceSurfaceFormatsKHR        pfnVkGetPhysicalDeviceSurfaceFormatsKHR;
-        PFN_vkGetPhysicalDeviceSurfacePresentModesKHR   pfnVkGetPhysicalDeviceSurfacePresentModesKHR;
+        VkSurfaceCapabilitiesKHR        surfaceCaps;
+        SurfaceFormatKHRVec             surfaceFormatVec;
+        PresentModeKHRVec               presentModeVec;
+    };
 
-        PFN_vkCreateSwapchainKHR     pfnVkCreateSwapchainKHR;
-        PFN_vkDestroySwapchainKHR    pfnVkDestroySwapchainKHR;
-        PFN_vkGetSwapchainImagesKHR  pfnVkGetSwapchainImagesKHR;
-        PFN_vkAcquireNextImageKHR    pfnVkAcquireNextImageKHR;
-        PFN_vkQueuePresentKHR        pfnVkQueuePresentKHR;
-
-    public:
-        void init(VkInstance inst, VkPhysicalDevice phyDev, VkDevice dev) {
-            instance   = inst;
-            physDevice = phyDev;
-            device     = dev;
-
-            pfnVkGetPhysicalDeviceSurfaceSupportKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
-                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR"));
-            pfnVkGetPhysicalDeviceSurfaceCapabilitiesKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
-                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
-            pfnVkGetPhysicalDeviceSurfaceFormatsKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
-                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
-            pfnVkGetPhysicalDeviceSurfacePresentModesKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
-                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
-
-            pfnVkCreateSwapchainKHR = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
-                vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR"));
-            pfnVkDestroySwapchainKHR = reinterpret_cast<PFN_vkDestroySwapchainKHR>(
-                vkGetDeviceProcAddr(device, "vkDestroySwapchainKHR"));
-            pfnVkGetSwapchainImagesKHR = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(
-                vkGetDeviceProcAddr(device, "vkGetSwapchainImagesKHR"));
-            pfnVkAcquireNextImageKHR = reinterpret_cast<PFN_vkAcquireNextImageKHR>(
-                vkGetDeviceProcAddr(device, "vkAcquireNextImageKHR"));
-            pfnVkQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
-                vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
-        }
-    } swapChain;
-
-    bool Init(HINSTANCE instance);
-    void Run();
-    void Shutdown(HINSTANCE instance);
-
-private:
-    void OpenWindow(HINSTANCE instance);
     void CreateInstance();
-    void AttachWindow(HINSTANCE instance);
-    void CreateDevice();
-    void InitSwapchain();
+    void OpenWindow(HINSTANCE instance);
+    void CreateSurface(HINSTANCE instance);
+    void ChoosePhysicalDevice();
+    void CreateLogicalDevice();
+    void CreateSwapChain();
+    void CreateImageViews();
     
-    void Render();
-
-    void DetachWindow();
+    void DestroyImageViews();
+    void DestroySwapChain();
+    void DestroyLogicalDevice();
+    void DestroySurface();
     void CloseWindow(HINSTANCE instance);
     void DestroyInstance();
-    void DestroyDevice();
+
+    void Render();
 
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         LPARAM lParam);
@@ -94,17 +65,28 @@ private:
         VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
 
-    HWND                hMainWindow         = NULL;
+    using SwapChainImageVec      = std::vector<VkImage>;
+    using SwapChainImageViewVec  = std::vector<VkImageView>;
 
-    VkPhysicalDevice    physicalDevice      = VK_NULL_HANDLE;
-    VkDevice            device              = VK_NULL_HANDLE;
-    VkSurfaceKHR        surface             = VK_NULL_HANDLE;
-    VkInstance          instance            = VK_NULL_HANDLE;
+    HWND                     hMainWindow         = NULL;
 
-    VkQueue             graphicsQueue       = VK_NULL_HANDLE;
-    VkQueue             presentQueue        = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debugMessenger      = VK_NULL_HANDLE;
+
+    VkInstance               instance            = VK_NULL_HANDLE;
+    VkPhysicalDevice         physicalDevice      = VK_NULL_HANDLE;
+    VkDevice                 device              = VK_NULL_HANDLE;
+    VkSurfaceKHR             surface             = VK_NULL_HANDLE;
+    VkSwapchainKHR           swapchain           = VK_NULL_HANDLE;
     
-    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+    VkQueue                  graphicsQueue       = VK_NULL_HANDLE;
+    VkQueue                  presentQueue        = VK_NULL_HANDLE;
+
+    SwapChainImageVec        swapChainImageVec;
+    SwapChainImageViewVec    swapChainImageViewVec;
+    QueueFamilyIndices       choosenQueueIndices;
+
+    VkFormat                 swapChainImageFormat;
+    VkExtent2D               swapChainImageExtent;
 
 #ifdef _DEBUG
     static inline const bool enableValidationLayers = true;
@@ -112,6 +94,10 @@ private:
     static inline const bool enableValidationLayers = false;
 #endif
 };
+
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region Static Members
 
 LRESULT CALLBACK Harmony::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -137,17 +123,24 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverit
     return VK_FALSE;
 }
 
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region Public interface
 bool Harmony::Init(HINSTANCE hinstance) {
     try {
         CreateInstance();
 
         OpenWindow(hinstance);
 
-        AttachWindow(hinstance);
+        CreateSurface(hinstance);
 
-        CreateDevice();
+        ChoosePhysicalDevice();
 
-        InitSwapchain();
+        CreateLogicalDevice();
+
+        CreateSwapChain();
+
+        CreateImageViews();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -176,9 +169,9 @@ void Harmony::Run() {
 
 void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
-        DestroyDevice();
+        DestroyLogicalDevice();
 
-        DetachWindow();
+        DestroySurface();
 
         CloseWindow(hinstance);
 
@@ -189,54 +182,9 @@ void Harmony::Shutdown(HINSTANCE hinstance) {
     }
 }
 
-void Harmony::OpenWindow(HINSTANCE hinstance) {
-    WNDCLASSEX wcex {
-        sizeof(WNDCLASSEX),
-        CS_HREDRAW | CS_VREDRAW,
-        WndProc,
-        0,
-        0,
-        hinstance,
-        LoadIcon(hinstance, IDI_APPLICATION),
-        LoadCursor(hinstance, IDC_ARROW),
-        (HBRUSH)GetStockObject(BLACK_BRUSH),
-        NULL,
-        APPLICATION_NAME,
-        LoadIcon(hinstance, IDI_APPLICATION)
-    };
-
-    if (!RegisterClassEx(&wcex)) {
-        throw std::runtime_error("Could not register class!");
-    }
-
-    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-    int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
-    int windowY = screenHeight / 2 - WINDOW_HEIGHT / 2;
-
-    hMainWindow = CreateWindowEx(
-        WS_EX_OVERLAPPEDWINDOW,
-        APPLICATION_NAME,
-        APPLICATION_NAME,
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        windowX,
-        windowY,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        NULL,
-        NULL,
-        hinstance,
-        NULL);
-    if (!hMainWindow) {
-        throw std::runtime_error("Could not create main window!");
-    }
-
-    ShowWindow(hMainWindow, SW_SHOW);
-    UpdateWindow(hMainWindow);
-    SetForegroundWindow(hMainWindow);
-    SetFocus(hMainWindow);
-}
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region Init Calls
 
 void Harmony::CreateInstance() {
     uint32_t itemCount = 0;
@@ -350,7 +298,56 @@ void Harmony::CreateInstance() {
     }
 }
 
-void Harmony::AttachWindow(HINSTANCE hinstance) {
+void Harmony::OpenWindow(HINSTANCE hinstance) {
+    WNDCLASSEX wcex {
+        sizeof(WNDCLASSEX),
+        CS_HREDRAW | CS_VREDRAW,
+        WndProc,
+        0,
+        0,
+        hinstance,
+        LoadIcon(hinstance, IDI_APPLICATION),
+        LoadCursor(hinstance, IDC_ARROW),
+        (HBRUSH)GetStockObject(BLACK_BRUSH),
+        NULL,
+        APPLICATION_NAME,
+        LoadIcon(hinstance, IDI_APPLICATION)
+    };
+
+    if (!RegisterClassEx(&wcex)) {
+        throw std::runtime_error("Could not register class!");
+    }
+
+    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
+    int windowY = screenHeight / 2 - WINDOW_HEIGHT / 2;
+
+    hMainWindow = CreateWindowEx(
+        WS_EX_OVERLAPPEDWINDOW,
+        APPLICATION_NAME,
+        APPLICATION_NAME,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        windowX,
+        windowY,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        NULL,
+        NULL,
+        hinstance,
+        NULL);
+    if (!hMainWindow) {
+        throw std::runtime_error("Could not create main window!");
+    }
+
+    ShowWindow(hMainWindow, SW_SHOW);
+    UpdateWindow(hMainWindow);
+    SetForegroundWindow(hMainWindow);
+    SetFocus(hMainWindow);
+}
+
+void Harmony::CreateSurface(HINSTANCE hinstance) {
     VkResult result;
 
     VkWin32SurfaceCreateInfoKHR createInfo {
@@ -367,162 +364,184 @@ void Harmony::AttachWindow(HINSTANCE hinstance) {
     }
 }
 
-void Harmony::CreateDevice() {
-    uint32_t itemCount;
+void Harmony::ChoosePhysicalDevice() {
+    uint32_t itemCount = 0;
     VkResult result;
 
     std::vector<const char*> requiredExtensions = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
 
-    auto rateDevice = [
-        re = requiredExtensions
-    ](VkPhysicalDevice& physicalDevice) -> int {
+    // queue family lambda
+    // expects surface member to be initialized
+    auto findQueueFamily = [&](VkPhysicalDevice pd) -> QueueFamilyIndices {
+        QueueFamilyIndices indices;
+        uint32_t qfCount = 0;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, nullptr);
+        if (!qfCount) {
+            return indices;
+        }
+
+        std::vector<VkQueueFamilyProperties> queueFamilyProps(qfCount);
+        uint32_t i = 0;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(pd, &qfCount, queueFamilyProps.data());
+        for (auto& qf : queueFamilyProps) {
+            VkBool32 presentSupported = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, surface, &presentSupported);
+
+            if (qf.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                indices.graphicsFamily = i;
+            }
+
+            if (qf.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                indices.computeFamily = i;
+            }
+
+            if (qf.queueFlags & VK_QUEUE_TRANSFER_BIT) {
+                indices.transferFamily = i;
+            }
+
+            if (presentSupported) {
+                indices.presentFamily = i;
+            }
+
+            if (indices.isComplete()) {
+                break;
+            }
+
+            ++i;
+        }
+
+        return indices;
+    };
+
+    // device rate lambda
+    auto rateDevice = [&](VkPhysicalDevice pd, QueueFamilyIndices& indices) -> int {
         VkPhysicalDeviceProperties  deviceProps;
         VkPhysicalDeviceFeatures    deviceFeats;
         uint32_t                    itemCount = 0;
         VkResult                    result;
 
-        int score = 0;
-
-        vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
-        if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            score += 1000;
-        }
-
-        vkGetPhysicalDeviceFeatures(physicalDevice, &deviceFeats);
-        if (deviceFeats.multiDrawIndirect) {
-            score += 200;
+        indices = findQueueFamily(pd);
+        if (!indices.isComplete()) {
+            return 0;
         }
 
         std::vector<const char*> enabledExtensions;
 
-        result = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &itemCount, nullptr);
+        result = vkEnumerateDeviceExtensionProperties(pd, nullptr, &itemCount, nullptr);
         if (result == VK_SUCCESS && itemCount) {
             std::vector<VkExtensionProperties>  extPropsVec(itemCount);
-            
+
             do {
-                result = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &itemCount, extPropsVec.data());
+                result = vkEnumerateDeviceExtensionProperties(pd, nullptr, &itemCount, extPropsVec.data());
             } while (result == VK_INCOMPLETE);
-            
-            for (auto& r : re) {
+
+            for (auto& r : requiredExtensions) {
                 for (auto& ext : extPropsVec) {
                     if (std::string(ext.extensionName) == r) {
                         enabledExtensions.emplace_back(r);
                     }
                 }
             }
-            
         }
 
-        if (re.size() != enabledExtensions.size()) {
-            score = 0;
+        if (requiredExtensions.size() != enabledExtensions.size()) {
+            return 0;
+        }
+
+        int score = 0;
+
+        vkGetPhysicalDeviceProperties(pd, &deviceProps);
+        if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            score += 1000;
+        }
+
+        vkGetPhysicalDeviceFeatures(pd, &deviceFeats);
+        if (deviceFeats.multiDrawIndirect) {
+            score += 200;
         }
 
         return score;
     };
 
-    auto findQueueFamily = [
-        psurf = surface
-    ](VkPhysicalDevice physicalDevice) -> QueueFamilyIndices {
-        QueueFamilyIndices index;
-        uint32_t qfCount = 0;
+    result = vkEnumeratePhysicalDevices(instance, &itemCount, nullptr);
+    if ((result != VK_SUCCESS) || itemCount == 0) {
+        throw std::runtime_error("Could not find amy Vulkan capble GPU!");
+    }
 
-        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &qfCount, nullptr);
-        if (qfCount) {
-            std::vector<VkQueueFamilyProperties> queueFamilyProps(qfCount);
-            uint32_t i = 0;
-
-            vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &qfCount, queueFamilyProps.data());
-            for (auto& qf : queueFamilyProps) {
-                VkBool32 presentSupported = VK_FALSE;
-                vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, psurf, &presentSupported);
-
-                if (qf.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-                    index.graphicsFamily = i;
-                }
-
-                if (qf.queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                    index.computeFamily = i;
-                }
-
-                if (qf.queueFlags & VK_QUEUE_TRANSFER_BIT) {
-                    index.transferFamily = i;
-                }
-
-                if (presentSupported) {
-                    index.presentFamily = i;
-                }
-
-                if (index.isComplete()) {
-                    break;
-                }
-
-                ++i;
-            }
-        }
-
-        return index;
+    struct DeviceAndQueueInfo {
+        VkPhysicalDevice   physicalDevice;
+        QueueFamilyIndices indices;
     };
 
-    std::map<int, VkPhysicalDevice> deviceMap;
+    std::vector<VkPhysicalDevice>     physDeviceVec(itemCount);
+    std::map<int, DeviceAndQueueInfo> deviceMap;
 
-    result = vkEnumeratePhysicalDevices(instance, &itemCount, nullptr);
-    if (result == VK_SUCCESS && itemCount) {
-        std::vector<VkPhysicalDevice> physDeviceVec(itemCount);
+    do {
+        result = vkEnumeratePhysicalDevices(instance, &itemCount, physDeviceVec.data());
+    } while (result == VK_INCOMPLETE);
 
-        do {
-            result = vkEnumeratePhysicalDevices(instance, &itemCount, physDeviceVec.data());
-        } while (result == VK_INCOMPLETE);
+    for (auto& physicalDevice : physDeviceVec) {
+        QueueFamilyIndices indices = {};
 
-        for (auto& physicalDevice : physDeviceVec) {
-            int score = rateDevice(physicalDevice);
+        int score = rateDevice(physicalDevice, indices);
 
-            deviceMap[score] = physicalDevice;
-        }
-    }
-    else {
-        throw std::runtime_error("Could not find Vulkan device!");
+        deviceMap[score] = { physicalDevice, indices };
     }
 
     if (deviceMap.empty()) {
         throw std::runtime_error("Could not find suitable device!");
     }
 
-    physicalDevice = deviceMap.rbegin()->second;
+    DeviceAndQueueInfo myDevice = deviceMap.rbegin()->second;
 
-    QueueFamilyIndices index = findQueueFamily(physicalDevice);
+    physicalDevice      = myDevice.physicalDevice;
+    choosenQueueIndices = myDevice.indices;
+}
+
+void Harmony::CreateLogicalDevice() {
+    VkResult result;
+
+    std::vector<const char*> requiredExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    };
 
     float queuePriority = 1.0f;
-    std::vector<VkDeviceQueueCreateInfo> queueCreateInfoVec {
-        {
-            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            nullptr,
-            0,
-            index.graphicsFamily.value(),
-            1,
-            &queuePriority
-        },
-        {
-            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            nullptr,
-            0,
-            index.presentFamily.value(),
-            1,
-            &queuePriority
-        }
-    };
+    std::vector<VkDeviceQueueCreateInfo> queueCreateInfoVec;
     
+    queueCreateInfoVec.push_back( VkDeviceQueueCreateInfo {
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        nullptr,
+        0,
+        choosenQueueIndices.graphicsFamily.value(),
+        1,
+        &queuePriority }
+    );
+
+    if (choosenQueueIndices.presentFamily.value() != choosenQueueIndices.graphicsFamily.value()) {
+        queueCreateInfoVec.push_back( VkDeviceQueueCreateInfo {
+                VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                nullptr,
+                0,
+                choosenQueueIndices.presentFamily.value(),
+                1,
+                &queuePriority }
+        );
+    }
+
     VkDeviceCreateInfo deviceCreateInfo {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         nullptr,
         0,                           // no flags
         static_cast<uint32_t>(queueCreateInfoVec.size()),
-        queueCreateInfoVec.data(),   // queue
+        queueCreateInfoVec.data(),   // queues
         0,
         nullptr,                     // deprecated
         static_cast<uint32_t>(requiredExtensions.size()),
-        requiredExtensions.data(),   // no device extensions yet
+        requiredExtensions.data(),   // device extensions
         nullptr                      // default features 
     };
 
@@ -531,32 +550,173 @@ void Harmony::CreateDevice() {
         throw std::runtime_error("Could not create logical device!");
     }
 
-    vkGetDeviceQueue(device, index.graphicsFamily.value(), 0, &graphicsQueue);
-    vkGetDeviceQueue(device, index.presentFamily.value(), 0, &presentQueue);
+    vkGetDeviceQueue(device, choosenQueueIndices.graphicsFamily.value(), 0, &graphicsQueue);
+    vkGetDeviceQueue(device, choosenQueueIndices.presentFamily.value(), 0, &presentQueue);
 }
 
-void Harmony::InitSwapchain() {
-    swapChain.init(instance, physicalDevice, device);
+void Harmony::CreateSwapChain() {
+    SurfaceCaps sCaps;
+    VkResult    result;
+    uint32_t    itemCount = 0;
+
+    // surface caps
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &sCaps.surfaceCaps);
+
+    //
+    // grab formats
+    //
+    result = vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &itemCount, nullptr);
+    if (result != VK_SUCCESS || itemCount == 0) {
+        throw std::runtime_error("failed querying surface formats!");
+    }
+
+    sCaps.surfaceFormatVec.resize(itemCount);
+    do {
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &itemCount, sCaps.surfaceFormatVec.data());
+    } while(result == VK_INCOMPLETE);
+    
+    //
+    // grab present modes
+    //
+    result = vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &itemCount, nullptr);
+    if (result != VK_SUCCESS || itemCount == 0) {
+        throw std::runtime_error("failed querying present modes!");
+    }
+
+    sCaps.presentModeVec.resize(itemCount);
+    do {
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &itemCount, sCaps.presentModeVec.data());
+    } while(result == VK_INCOMPLETE);
+
+    // choose a surface format
+    VkSurfaceFormatKHR  surfaceFormat = sCaps.surfaceFormatVec[0];
+    for (auto& fmt : sCaps.surfaceFormatVec) {
+        if (fmt.format == VK_FORMAT_B8G8R8A8_SRGB) {
+            surfaceFormat = fmt;
+            break;
+        }
+    }
+
+    // choose present mode
+    VkPresentModeKHR    presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    for (auto& mode : sCaps.presentModeVec) {
+        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+            presentMode = mode;
+            break;
+        }
+    }
+
+    // choose extent
+    VkExtent2D extent = sCaps.surfaceCaps.currentExtent;
+    if( (extent.width == UINT32_MAX) || (extent.height == UINT32_MAX )) {
+        extent = { 
+            std::clamp<uint32_t>(WINDOW_WIDTH,  sCaps.surfaceCaps.minImageExtent.width,  sCaps.surfaceCaps.maxImageExtent.width),
+            std::clamp<uint32_t>(WINDOW_HEIGHT, sCaps.surfaceCaps.minImageExtent.height, sCaps.surfaceCaps.maxImageExtent.height)
+        };
+    }
+
+    uint32_t numImages = sCaps.surfaceCaps.minImageCount;
+    numImages = std::clamp<uint32_t>(numImages, sCaps.surfaceCaps.minImageCount + 1, sCaps.surfaceCaps.maxImageCount);
+
+    VkSharingMode shareMode = VkSharingMode::VK_SHARING_MODE_EXCLUSIVE;
+    std::vector<uint32_t>   queueFamilyIndices;
+
+    queueFamilyIndices.push_back(choosenQueueIndices.graphicsFamily.value());
+
+    if (choosenQueueIndices.graphicsFamily != choosenQueueIndices.presentFamily) {
+        shareMode = VkSharingMode::VK_SHARING_MODE_CONCURRENT;
+        queueFamilyIndices.push_back(choosenQueueIndices.presentFamily.value());
+    }
+
+    // swap chain
+    VkSwapchainCreateInfoKHR createInfo {
+        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        nullptr,
+        0,
+        surface,
+        numImages,
+        surfaceFormat.format,
+        surfaceFormat.colorSpace,
+        extent,
+        1,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        shareMode,
+        static_cast<uint32_t>(queueFamilyIndices.size()),
+        queueFamilyIndices.data(),                                          
+        sCaps.surfaceCaps.currentTransform,                                 // transform
+        VkCompositeAlphaFlagBitsKHR::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,     // composite alpha
+        presentMode,                                                        // presentMode
+        VK_TRUE,                                                            // clipped
+        VK_NULL_HANDLE,                                                     // old swap chain
+    };
+
+    result = vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create swap chain!");
+    }
+
+    result = vkGetSwapchainImagesKHR(device, swapchain, &numImages, nullptr);
+    if (result == VK_SUCCESS && numImages) {
+        swapChainImageVec.resize(numImages);
+
+        do {
+            result = vkGetSwapchainImagesKHR(device, swapchain, &numImages, swapChainImageVec.data());
+        } while( result == VK_INCOMPLETE);
+    }
+
+    swapChainImageFormat = surfaceFormat.format;
+    swapChainImageExtent = extent;
 }
 
+void Harmony::CreateImageViews() {
+    VkResult result;
 
+    swapChainImageViewVec.resize(swapChainImageVec.size());
 
-void Harmony::Render() {
+    for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
+        VkImageViewCreateInfo createInfo {
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            nullptr,
+            0,
+            swapChainImageVec[i],
+            VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+            swapChainImageFormat,
+            { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
+            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
+        };
 
+        result = vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViewVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create a swap chain image view!");
+        }
+    }
 }
 
-void Harmony::DetachWindow() {
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region Exit Calls
+void Harmony::DestroyImageViews() {
+    for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
+        vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
+    }
+}
+
+void Harmony::DestroySwapChain() {
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+}
+
+void Harmony::DestroyLogicalDevice() {
+    vkDestroyDevice(device, nullptr);
+}
+
+void Harmony::DestroySurface() {
     vkDestroySurfaceKHR(instance, surface, nullptr);
 }
 
-void Harmony::CloseWindow(HINSTANCE instance) {
+void Harmony::CloseWindow(HINSTANCE hinstance) {
     DestroyWindow(hMainWindow);
 
-    UnregisterClass(APPLICATION_NAME, instance);
-}
-
-void Harmony::DestroyDevice() {
-    vkDestroyDevice(device, nullptr);
+    UnregisterClass(APPLICATION_NAME, hinstance);
 }
 
 void Harmony::DestroyInstance() {
@@ -569,6 +729,17 @@ void Harmony::DestroyInstance() {
 
     vkDestroyInstance(instance, nullptr);
 }
+
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+#pragma region Rendering
+
+void Harmony::Render() {
+
+}
+
+#pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
 
 static void MakeConsole() {
     AllocConsole();
