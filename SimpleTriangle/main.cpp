@@ -17,9 +17,10 @@ public:
         std::optional<uint32_t>  graphicsFamily;
         std::optional<uint32_t>  computeFamily;
         std::optional<uint32_t>  transferFamily;
+        std::optional<uint32_t>  presentFamily;
 
         bool isComplete() const {
-            return graphicsFamily.has_value() && computeFamily.has_value() && transferFamily.has_value();
+            return graphicsFamily.has_value() && computeFamily.has_value() && transferFamily.has_value() && presentFamily.has_value();
         }
     };
 
@@ -28,7 +29,6 @@ public:
         VkInstance          instance;
         VkPhysicalDevice    physDevice;
         VkDevice            device;
-        VkSurfaceKHR        surface;
 
         PFN_vkGetPhysicalDeviceSurfaceSupportKHR        pfnVkGetPhysicalDeviceSurfaceSupportKHR;
         PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR   pfnVkGetPhysicalDeviceSurfaceCapabilitiesKHR;
@@ -74,13 +74,15 @@ public:
     void Shutdown(HINSTANCE instance);
 
 private:
+    void OpenWindow(HINSTANCE instance);
     void CreateInstance();
+    void AttachWindow(HINSTANCE instance);
     void CreateDevice();
     void InitSwapchain();
-    void OpenWindow(HINSTANCE instance);
-
+    
     void Render();
 
+    void DetachWindow();
     void CloseWindow(HINSTANCE instance);
     void DestroyInstance();
     void DestroyDevice();
@@ -92,12 +94,16 @@ private:
         VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
 
-    HWND                hMainWindow     = NULL;
+    HWND                hMainWindow         = NULL;
 
-    VkPhysicalDevice    physicalDevice  = VK_NULL_HANDLE;
-    VkDevice            device          = VK_NULL_HANDLE;
-    VkInstance          instance        = VK_NULL_HANDLE;
+    VkPhysicalDevice    physicalDevice      = VK_NULL_HANDLE;
+    VkDevice            device              = VK_NULL_HANDLE;
+    VkSurfaceKHR        surface             = VK_NULL_HANDLE;
+    VkInstance          instance            = VK_NULL_HANDLE;
 
+    VkQueue             graphicsQueue       = VK_NULL_HANDLE;
+    VkQueue             presentQueue        = VK_NULL_HANDLE;
+    
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 
 #ifdef _DEBUG
@@ -131,17 +137,17 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverit
     return VK_FALSE;
 }
 
-bool Harmony::Init(HINSTANCE instance) {
+bool Harmony::Init(HINSTANCE hinstance) {
     try {
         CreateInstance();
+
+        OpenWindow(hinstance);
+
+        AttachWindow(hinstance);
 
         CreateDevice();
 
         InitSwapchain();
-
-        OpenWindow(instance);
-
-
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -168,17 +174,68 @@ void Harmony::Run() {
     }
 }
 
-void Harmony::Shutdown(HINSTANCE instance) {
+void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
-        CloseWindow(instance);
-
         DestroyDevice();
+
+        DetachWindow();
+
+        CloseWindow(hinstance);
 
         DestroyInstance();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
     }
+}
+
+void Harmony::OpenWindow(HINSTANCE hinstance) {
+    WNDCLASSEX wcex {
+        sizeof(WNDCLASSEX),
+        CS_HREDRAW | CS_VREDRAW,
+        WndProc,
+        0,
+        0,
+        hinstance,
+        LoadIcon(hinstance, IDI_APPLICATION),
+        LoadCursor(hinstance, IDC_ARROW),
+        (HBRUSH)GetStockObject(BLACK_BRUSH),
+        NULL,
+        APPLICATION_NAME,
+        LoadIcon(hinstance, IDI_APPLICATION)
+    };
+
+    if (!RegisterClassEx(&wcex)) {
+        throw std::runtime_error("Could not register class!");
+    }
+
+    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
+    int windowY = screenHeight / 2 - WINDOW_HEIGHT / 2;
+
+    hMainWindow = CreateWindowEx(
+        WS_EX_OVERLAPPEDWINDOW,
+        APPLICATION_NAME,
+        APPLICATION_NAME,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        windowX,
+        windowY,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        NULL,
+        NULL,
+        hinstance,
+        NULL);
+    if (!hMainWindow) {
+        throw std::runtime_error("Could not create main window!");
+    }
+
+    ShowWindow(hMainWindow, SW_SHOW);
+    UpdateWindow(hMainWindow);
+    SetForegroundWindow(hMainWindow);
+    SetFocus(hMainWindow);
 }
 
 void Harmony::CreateInstance() {
@@ -293,6 +350,23 @@ void Harmony::CreateInstance() {
     }
 }
 
+void Harmony::AttachWindow(HINSTANCE hinstance) {
+    VkResult result;
+
+    VkWin32SurfaceCreateInfoKHR createInfo {
+        VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        nullptr,
+        0,
+        hinstance,
+        hMainWindow
+    };
+
+    result = vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create Win32 surface!");
+    }
+}
+
 void Harmony::CreateDevice() {
     uint32_t itemCount;
     VkResult result;
@@ -348,7 +422,9 @@ void Harmony::CreateDevice() {
         return score;
     };
 
-    auto findQueueFamily = [](VkPhysicalDevice physicalDevice) -> QueueFamilyIndices {
+    auto findQueueFamily = [
+        psurf = surface
+    ](VkPhysicalDevice physicalDevice) -> QueueFamilyIndices {
         QueueFamilyIndices index;
         uint32_t qfCount = 0;
 
@@ -359,6 +435,9 @@ void Harmony::CreateDevice() {
 
             vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &qfCount, queueFamilyProps.data());
             for (auto& qf : queueFamilyProps) {
+                VkBool32 presentSupported = VK_FALSE;
+                vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, psurf, &presentSupported);
+
                 if (qf.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
                     index.graphicsFamily = i;
                 }
@@ -369,6 +448,10 @@ void Harmony::CreateDevice() {
 
                 if (qf.queueFlags & VK_QUEUE_TRANSFER_BIT) {
                     index.transferFamily = i;
+                }
+
+                if (presentSupported) {
+                    index.presentFamily = i;
                 }
 
                 if (index.isComplete()) {
@@ -409,23 +492,33 @@ void Harmony::CreateDevice() {
     physicalDevice = deviceMap.rbegin()->second;
 
     QueueFamilyIndices index = findQueueFamily(physicalDevice);
+
     float queuePriority = 1.0f;
-
-    VkDeviceQueueCreateInfo qCreateInfo{
-        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        nullptr,
-        0,
-        index.graphicsFamily.value(),
-        1,
-        &queuePriority
+    std::vector<VkDeviceQueueCreateInfo> queueCreateInfoVec {
+        {
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            nullptr,
+            0,
+            index.graphicsFamily.value(),
+            1,
+            &queuePriority
+        },
+        {
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            nullptr,
+            0,
+            index.presentFamily.value(),
+            1,
+            &queuePriority
+        }
     };
-
-    VkDeviceCreateInfo dCreateInfo{
+    
+    VkDeviceCreateInfo deviceCreateInfo {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         nullptr,
         0,                           // no flags
-        1,
-        &qCreateInfo,                // single queue
+        static_cast<uint32_t>(queueCreateInfoVec.size()),
+        queueCreateInfoVec.data(),   // queue
         0,
         nullptr,                     // deprecated
         static_cast<uint32_t>(requiredExtensions.size()),
@@ -433,67 +526,27 @@ void Harmony::CreateDevice() {
         nullptr                      // default features 
     };
 
-    result = vkCreateDevice(physicalDevice, &dCreateInfo, nullptr, &device);
+    result = vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create logical device!");
     }
+
+    vkGetDeviceQueue(device, index.graphicsFamily.value(), 0, &graphicsQueue);
+    vkGetDeviceQueue(device, index.presentFamily.value(), 0, &presentQueue);
 }
 
 void Harmony::InitSwapchain() {
     swapChain.init(instance, physicalDevice, device);
 }
 
-void Harmony::OpenWindow(HINSTANCE instance) {
-    WNDCLASSEX wcex {
-        sizeof(WNDCLASSEX),
-        CS_HREDRAW | CS_VREDRAW,
-        WndProc,
-        0,
-        0,
-        NULL,
-        LoadIcon(NULL, IDI_APPLICATION),
-        LoadCursor(NULL, IDC_ARROW),
-        (HBRUSH)GetStockObject(BLACK_BRUSH),
-        NULL,
-        APPLICATION_NAME,
-        LoadIcon(wcex.hInstance, IDI_APPLICATION)
-    };
 
-    if (!RegisterClassEx(&wcex)) {
-        throw std::runtime_error("Could not register class!");
-    }
-
-    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-
-    int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
-    int windowY = screenHeight / 2 - WINDOW_HEIGHT / 2;
-
-    hMainWindow = CreateWindowEx(
-        WS_EX_OVERLAPPEDWINDOW,
-        APPLICATION_NAME,
-        APPLICATION_NAME,
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        windowX,
-        windowY,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        NULL,
-        NULL,
-        instance,
-        NULL);
-    if (!hMainWindow) {
-        throw std::runtime_error("Could not create main window!");
-    }
-
-    ShowWindow(hMainWindow, SW_SHOW);
-    UpdateWindow(hMainWindow);
-    SetForegroundWindow(hMainWindow);
-    SetFocus(hMainWindow);
-}
 
 void Harmony::Render() {
 
+}
+
+void Harmony::DetachWindow() {
+    vkDestroySurfaceKHR(instance, surface, nullptr);
 }
 
 void Harmony::CloseWindow(HINSTANCE instance) {
