@@ -7,6 +7,10 @@
 #include <optional>
 #include <map>
 
+#define APPLICATION_NAME        "SimpleTriangle"
+#define WINDOW_WIDTH            1920
+#define WINDOW_HEIGHT           1080
+
 class alignas(64) Harmony {
 public:
     struct QueueFamilyIndices {
@@ -19,25 +23,82 @@ public:
         }
     };
 
-    bool Init();
-    void Shutdown();
+    struct SwapChain {
+    private:
+        VkInstance          instance;
+        VkPhysicalDevice    physDevice;
+        VkDevice            device;
+        VkSurfaceKHR        surface;
+
+        PFN_vkGetPhysicalDeviceSurfaceSupportKHR        pfnVkGetPhysicalDeviceSurfaceSupportKHR;
+        PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR   pfnVkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+        PFN_vkGetPhysicalDeviceSurfaceFormatsKHR        pfnVkGetPhysicalDeviceSurfaceFormatsKHR;
+        PFN_vkGetPhysicalDeviceSurfacePresentModesKHR   pfnVkGetPhysicalDeviceSurfacePresentModesKHR;
+
+        PFN_vkCreateSwapchainKHR     pfnVkCreateSwapchainKHR;
+        PFN_vkDestroySwapchainKHR    pfnVkDestroySwapchainKHR;
+        PFN_vkGetSwapchainImagesKHR  pfnVkGetSwapchainImagesKHR;
+        PFN_vkAcquireNextImageKHR    pfnVkAcquireNextImageKHR;
+        PFN_vkQueuePresentKHR        pfnVkQueuePresentKHR;
+
+    public:
+        void init(VkInstance inst, VkPhysicalDevice phyDev, VkDevice dev) {
+            instance   = inst;
+            physDevice = phyDev;
+            device     = dev;
+
+            pfnVkGetPhysicalDeviceSurfaceSupportKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR"));
+            pfnVkGetPhysicalDeviceSurfaceCapabilitiesKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+            pfnVkGetPhysicalDeviceSurfaceFormatsKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
+            pfnVkGetPhysicalDeviceSurfacePresentModesKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+
+            pfnVkCreateSwapchainKHR = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
+                vkGetDeviceProcAddr(device, "vkCreateSwapchainKHR"));
+            pfnVkDestroySwapchainKHR = reinterpret_cast<PFN_vkDestroySwapchainKHR>(
+                vkGetDeviceProcAddr(device, "vkDestroySwapchainKHR"));
+            pfnVkGetSwapchainImagesKHR = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(
+                vkGetDeviceProcAddr(device, "vkGetSwapchainImagesKHR"));
+            pfnVkAcquireNextImageKHR = reinterpret_cast<PFN_vkAcquireNextImageKHR>(
+                vkGetDeviceProcAddr(device, "vkAcquireNextImageKHR"));
+            pfnVkQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(
+                vkGetDeviceProcAddr(device, "vkQueuePresentKHR"));
+        }
+    } swapChain;
+
+    bool Init(HINSTANCE instance);
+    void Run();
+    void Shutdown(HINSTANCE instance);
 
 private:
     void CreateInstance();
     void CreateDevice();
+    void InitSwapchain();
+    void OpenWindow(HINSTANCE instance);
 
+    void Render();
+
+    void CloseWindow(HINSTANCE instance);
     void DestroyInstance();
     void DestroyDevice();
+
+    static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
+        LPARAM lParam);
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, 
         VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
 
+    HWND                hMainWindow     = NULL;
+
     VkPhysicalDevice    physicalDevice  = VK_NULL_HANDLE;
     VkDevice            device          = VK_NULL_HANDLE;
     VkInstance          instance        = VK_NULL_HANDLE;
 
-    VkDebugUtilsMessengerEXT debugMessenger;
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 
 #ifdef _DEBUG
     static inline const bool enableValidationLayers = true;
@@ -45,6 +106,19 @@ private:
     static inline const bool enableValidationLayers = false;
 #endif
 };
+
+LRESULT CALLBACK Harmony::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CLOSE:
+    case WM_DESTROY:
+    {
+        PostQuitMessage(0);         // close the application entirely
+        return 0;
+    };
+    }
+
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
 
 VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
                                                       VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -57,11 +131,17 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverit
     return VK_FALSE;
 }
 
-bool Harmony::Init() {
+bool Harmony::Init(HINSTANCE instance) {
     try {
         CreateInstance();
 
         CreateDevice();
+
+        InitSwapchain();
+
+        OpenWindow(instance);
+
+
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -71,8 +151,27 @@ bool Harmony::Init() {
     return true;
 }
 
-void Harmony::Shutdown() {
+void Harmony::Run() {
+    while (true) {
+        MSG msg;
+
+        while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        if (msg.message == WM_QUIT) {
+            break;
+        }
+
+        Render();
+    }
+}
+
+void Harmony::Shutdown(HINSTANCE instance) {
     try {
+        CloseWindow(instance);
+
         DestroyDevice();
 
         DestroyInstance();
@@ -195,12 +294,20 @@ void Harmony::CreateInstance() {
 }
 
 void Harmony::CreateDevice() {
-    uint32_t itemCount = 0;
+    uint32_t itemCount;
     VkResult result;
 
-    auto rateDevice = [](VkPhysicalDevice& physicalDevice) -> int {
-        VkPhysicalDeviceProperties deviceProps;
-        VkPhysicalDeviceFeatures   deviceFeats;
+    std::vector<const char*> requiredExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+
+    auto rateDevice = [
+        re = requiredExtensions
+    ](VkPhysicalDevice& physicalDevice) -> int {
+        VkPhysicalDeviceProperties  deviceProps;
+        VkPhysicalDeviceFeatures    deviceFeats;
+        uint32_t                    itemCount = 0;
+        VkResult                    result;
 
         int score = 0;
 
@@ -210,7 +317,34 @@ void Harmony::CreateDevice() {
         }
 
         vkGetPhysicalDeviceFeatures(physicalDevice, &deviceFeats);
-        
+        if (deviceFeats.multiDrawIndirect) {
+            score += 200;
+        }
+
+        std::vector<const char*> enabledExtensions;
+
+        result = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &itemCount, nullptr);
+        if (result == VK_SUCCESS && itemCount) {
+            std::vector<VkExtensionProperties>  extPropsVec(itemCount);
+            
+            do {
+                result = vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &itemCount, extPropsVec.data());
+            } while (result == VK_INCOMPLETE);
+            
+            for (auto& r : re) {
+                for (auto& ext : extPropsVec) {
+                    if (std::string(ext.extensionName) == r) {
+                        enabledExtensions.emplace_back(r);
+                    }
+                }
+            }
+            
+        }
+
+        if (re.size() != enabledExtensions.size()) {
+            score = 0;
+        }
+
         return score;
     };
 
@@ -289,20 +423,83 @@ void Harmony::CreateDevice() {
     VkDeviceCreateInfo dCreateInfo{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         nullptr,
-        0,            // no flags
+        0,                           // no flags
         1,
-        &qCreateInfo, // single queue
+        &qCreateInfo,                // single queue
         0,
-        nullptr,      // deprecated
-        0,
-        nullptr,      // no device extensions yet  
-        nullptr       // default features 
+        nullptr,                     // deprecated
+        static_cast<uint32_t>(requiredExtensions.size()),
+        requiredExtensions.data(),   // no device extensions yet
+        nullptr                      // default features 
     };
 
     result = vkCreateDevice(physicalDevice, &dCreateInfo, nullptr, &device);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create logical device!");
     }
+}
+
+void Harmony::InitSwapchain() {
+    swapChain.init(instance, physicalDevice, device);
+}
+
+void Harmony::OpenWindow(HINSTANCE instance) {
+    WNDCLASSEX wcex {
+        sizeof(WNDCLASSEX),
+        CS_HREDRAW | CS_VREDRAW,
+        WndProc,
+        0,
+        0,
+        NULL,
+        LoadIcon(NULL, IDI_APPLICATION),
+        LoadCursor(NULL, IDC_ARROW),
+        (HBRUSH)GetStockObject(BLACK_BRUSH),
+        NULL,
+        APPLICATION_NAME,
+        LoadIcon(wcex.hInstance, IDI_APPLICATION)
+    };
+
+    if (!RegisterClassEx(&wcex)) {
+        throw std::runtime_error("Could not register class!");
+    }
+
+    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+    int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
+    int windowY = screenHeight / 2 - WINDOW_HEIGHT / 2;
+
+    hMainWindow = CreateWindowEx(
+        WS_EX_OVERLAPPEDWINDOW,
+        APPLICATION_NAME,
+        APPLICATION_NAME,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        windowX,
+        windowY,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        NULL,
+        NULL,
+        instance,
+        NULL);
+    if (!hMainWindow) {
+        throw std::runtime_error("Could not create main window!");
+    }
+
+    ShowWindow(hMainWindow, SW_SHOW);
+    UpdateWindow(hMainWindow);
+    SetForegroundWindow(hMainWindow);
+    SetFocus(hMainWindow);
+}
+
+void Harmony::Render() {
+
+}
+
+void Harmony::CloseWindow(HINSTANCE instance) {
+    DestroyWindow(hMainWindow);
+
+    UnregisterClass(APPLICATION_NAME, instance);
 }
 
 void Harmony::DestroyDevice() {
@@ -322,6 +519,8 @@ void Harmony::DestroyInstance() {
 
 static void MakeConsole() {
     AllocConsole();
+    AttachConsole(GetCurrentProcessId());
+    SetConsoleTitle(TEXT(APPLICATION_NAME));
 
     FILE* fDummy = nullptr;
     freopen_s(&fDummy, "CONIN$",  "r",  stdin);
@@ -330,14 +529,17 @@ static void MakeConsole() {
 }
 
 int main(int argc, char* argv[]) {
+    HINSTANCE instance = NULL;
     MakeConsole();
 
     Harmony app;
 
-    if (!app.Init()) {
+    if (!app.Init(instance)) {
         return -1;
     }
 
-    app.Shutdown();
+    app.Run();
+    app.Shutdown(instance);
+
     return 0;
 }
