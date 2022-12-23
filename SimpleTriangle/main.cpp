@@ -6,6 +6,7 @@
 #include <vector>
 #include <optional>
 #include <algorithm>
+#include <fstream>
 #include <map>
 
 #define APPLICATION_NAME        "SimpleTriangle"
@@ -48,7 +49,15 @@ private:
     void CreateLogicalDevice();
     void CreateSwapChain();
     void CreateImageViews();
-    
+    void CreateRenderPass();
+    void CreateGraphicsPipeline();
+    void CreateFrameBuffers();
+    void CreateCommandPoolAndBuffers();
+
+    void DestroyCommandPoolAndBuffers();
+    void DestroyFrameBuffers();
+    void DestroyGraphicsPipeline();
+    void DestroyRenderPass();
     void DestroyImageViews();
     void DestroySwapChain();
     void DestroyLogicalDevice();
@@ -56,6 +65,7 @@ private:
     void CloseWindow(HINSTANCE instance);
     void DestroyInstance();
 
+    void RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex);
     void Render();
 
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
@@ -65,8 +75,11 @@ private:
         VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
 
-    using SwapChainImageVec      = std::vector<VkImage>;
-    using SwapChainImageViewVec  = std::vector<VkImageView>;
+    static std::vector<char> readShaderFile(const std::string& filePath);
+
+    using SwapChainImageVec       = std::vector<VkImage>;
+    using SwapChainImageViewVec   = std::vector<VkImageView>;
+    using SwapChainFramebufferVec = std::vector<VkFramebuffer>;
 
     HWND                     hMainWindow         = NULL;
 
@@ -81,8 +94,15 @@ private:
     VkQueue                  graphicsQueue       = VK_NULL_HANDLE;
     VkQueue                  presentQueue        = VK_NULL_HANDLE;
 
+    VkRenderPass             renderPass          = VK_NULL_HANDLE;
+    VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
+    VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
+    VkCommandPool            commandPool         = VK_NULL_HANDLE;
+    VkCommandBuffer          cmdBuffer           = VK_NULL_HANDLE; 
+
     SwapChainImageVec        swapChainImageVec;
     SwapChainImageViewVec    swapChainImageViewVec;
+    SwapChainFramebufferVec  swapChainFramebufferVec;
     QueueFamilyIndices       choosenQueueIndices;
 
     VkFormat                 swapChainImageFormat;
@@ -123,6 +143,26 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverit
     return VK_FALSE;
 }
 
+std::vector<char> Harmony::readShaderFile(const std::string& filePath) {
+    std::fstream file;
+    std::vector<char> fileData;
+
+    file.open(filePath, std::ios::in | std::ios::binary | std::ios::ate );
+    if (!file) {
+        throw std::runtime_error("Could not open shader module to read!");
+    }
+
+    std::size_t fileSize = static_cast<size_t>( file.tellg() );
+    file.seekg(0);
+
+    fileData.resize(fileSize);
+
+    file.read(fileData.data(), fileSize);
+    file.close();
+
+    return fileData;
+}
+
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Public interface
@@ -141,6 +181,14 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateSwapChain();
 
         CreateImageViews();
+
+        CreateRenderPass();
+
+        CreateGraphicsPipeline();
+
+        CreateFrameBuffers();
+
+        CreateCommandPoolAndBuffers();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -169,6 +217,14 @@ void Harmony::Run() {
 
 void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
+        DestroyCommandPoolAndBuffers();
+
+        DestroyFrameBuffers();
+
+        DestroyGraphicsPipeline();
+
+        DestroyRenderPass();
+
         DestroyImageViews();
 
         DestroySwapChain();
@@ -696,9 +752,345 @@ void Harmony::CreateImageViews() {
     }
 }
 
+void Harmony::CreateRenderPass() {
+    VkResult result;
+
+    VkAttachmentDescription renderTarget {
+        0,
+        swapChainImageFormat,                    // format
+        VK_SAMPLE_COUNT_1_BIT,                   // samples 
+        VK_ATTACHMENT_LOAD_OP_CLEAR,             // clear on load  
+        VK_ATTACHMENT_STORE_OP_STORE,            // store to mem on exit of pass
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE,         // not using depth stencil
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,        // not using depth stencil 
+        VK_IMAGE_LAYOUT_UNDEFINED,               // don't care what layout was before
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR          // transition to present 
+    };
+
+    VkAttachmentReference rtAttachmentRef {
+        0,                                       // attachment is referred to at layout = 0 in shader
+        VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL       // accessed optimally
+    };
+
+    VkSubpassDescription subPassDesc {
+        0,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        0,                    // 0 input attachments
+        nullptr,
+        1,                    // 1 color attachments
+        &rtAttachmentRef, 
+        nullptr,              // no msaa
+        nullptr,              // no depth stencil
+        0,                    // nothing to preserve
+        nullptr,
+    };
+
+    VkRenderPassCreateInfo rpCreateInfo {
+        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        nullptr,
+        0,
+        1,
+        &renderTarget,
+        1,
+        &subPassDesc,
+        0,
+        nullptr
+    };
+
+    result = vkCreateRenderPass(device, &rpCreateInfo, nullptr, &renderPass);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create renderpass object!");
+    }
+}
+
+void Harmony::CreateGraphicsPipeline() {
+    CHAR currentDirectory[MAX_PATH + 1];
+    VkResult result;
+
+    GetCurrentDirectory(MAX_PATH, currentDirectory);
+
+    std::string vPath(currentDirectory);
+    vPath += "\\shaders\\vert.spv";
+    auto vShader = readShaderFile(vPath);
+
+    std::string fPath(currentDirectory);
+    fPath += "\\shaders\\frag.spv";
+    auto fShader = readShaderFile(fPath);
+
+    VkShaderModule vShaderModule, fShaderModule;
+
+    {
+        VkShaderModuleCreateInfo vCreateInfo {
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            nullptr,
+            0,
+            static_cast<uint32_t>(vShader.size()),
+            reinterpret_cast<uint32_t*>(vShader.data())
+        };
+
+        result = vkCreateShaderModule(device, &vCreateInfo, nullptr, &vShaderModule);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create vertex shader module!");
+        }
+    }
+
+    {
+        VkShaderModuleCreateInfo fCreateInfo {
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            nullptr,
+            0,
+            static_cast<uint32_t>(fShader.size()),
+            reinterpret_cast<uint32_t*>(fShader.data())
+        };
+
+        result = vkCreateShaderModule(device, &fCreateInfo, nullptr, &fShaderModule);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create fragment shader module!");
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo vShaderStageCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        nullptr,
+        0,
+        VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT,
+        vShaderModule,
+        "main",
+        nullptr    // no specialization constants
+    };
+
+    VkPipelineShaderStageCreateInfo fShaderStageCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        nullptr,
+        0,
+        VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT,
+        fShaderModule,
+        "main",
+        nullptr    // no specialization constants
+    };
+
+    VkPipelineShaderStageCreateInfo shaderStagesCreateInfos[] = { vShaderStageCreateInfo, fShaderStageCreateInfo };
+
+    // dynamic states
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+
+    VkPipelineDynamicStateCreateInfo dynStateCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        static_cast<uint32_t>(dynamicStates.size()),
+        dynamicStates.data()
+    };
+
+    VkPipelineViewportStateCreateInfo vpStateCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        1, // viewportCount
+        nullptr, // specified in cmd buffer
+        1, // scissorCount
+        nullptr  // specified in cmd buffer
+    };
+
+    VkPipelineVertexInputStateCreateInfo vfStateCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        0,  // vertexBindingDescriptionCount
+        nullptr,
+        0,  // vertexAttributeDescriptionCount,
+        nullptr
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo iaStateCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        VK_FALSE // primitiveRestartEnable
+    };
+
+    VkPipelineRasterizationStateCreateInfo rsStateCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_FALSE, // depthClampEnable
+        VK_FALSE, // rasterizerDiscardEnable - we render to RT
+        VkPolygonMode::VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        VK_FRONT_FACE_CLOCKWISE,
+        VK_FALSE, // depthBiasEnable
+        0.0f,     // depthBiasConstantFactor
+        0.0f,     // depthBiasClamp
+        0.0f,     // depthBiasSlopeFactor
+        0.0f      // lineWidth
+    };
+
+    VkPipelineMultisampleStateCreateInfo msaaStateCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_FALSE, // sampleShadingEnable
+        1.0f,     // minSampleShading
+        nullptr,  // pSampleMask
+        VK_FALSE, // alphaToCoverageEnable 
+        VK_FALSE  // alphaToOneEnable
+    };
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachmentState{
+        VK_FALSE, // blendEnable
+        VK_BLEND_FACTOR_ONE,  // srcColorBlendFactor
+        VK_BLEND_FACTOR_ZERO, // dstColorBlendFactor
+        VK_BLEND_OP_ADD,      // colorBlendOp
+        VK_BLEND_FACTOR_ONE,  // srcAlphaBlendFactor
+        VK_BLEND_FACTOR_ZERO, // dstAlphaBlendFactor
+        VK_BLEND_OP_ADD,      // alphaBlendOp
+        VK_COLOR_COMPONENT_A_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_R_BIT  // colorWriteMask
+    };
+
+    VkPipelineColorBlendStateCreateInfo cbStateCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_FALSE,           // logicOpEnable
+        VK_LOGIC_OP_COPY,   // op if enabled
+        1,                  // attachment count
+        &colorBlendAttachmentState,
+        { 0.0f, 0.0f, 0.0f, 0.0f }  // blend constants
+    };
+
+    VkPipelineLayoutCreateInfo plCreateInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        nullptr,
+        0,
+        0,       // setLayoutCOunt
+        nullptr, // pSetLayouts
+        0,       // pushConstantRangeCount
+        nullptr, // pPushConstantRanges
+    };
+
+    result = vkCreatePipelineLayout(device, &plCreateInfo, nullptr, &pipelineLayout);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create pipeline layout!");
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo {
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        nullptr,
+        0,
+        2,
+        shaderStagesCreateInfos,
+        &vfStateCreateInfo,
+        &iaStateCreateInfo,
+        nullptr,
+        &vpStateCreateInfo,
+        &rsStateCreateInfo,
+        nullptr,
+        nullptr,
+        &cbStateCreateInfo,
+        &dynStateCreateInfo,
+        pipelineLayout,
+        renderPass,
+        0,
+        VK_NULL_HANDLE,
+        -1
+    };
+
+    result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &graphicsPipeline);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create graphics pipeline!");
+    }
+
+    vkDestroyShaderModule(device, fShaderModule, nullptr);
+    vkDestroyShaderModule(device, vShaderModule, nullptr);
+}
+
+void Harmony::CreateFrameBuffers() {
+    VkResult result;
+
+    swapChainFramebufferVec.resize(swapChainImageViewVec.size());
+
+    for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
+        VkImageView attachments[] = {
+            swapChainImageViewVec[i]
+        };
+
+        VkFramebufferCreateInfo fbCreateInfo{
+            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            nullptr,
+            0,
+            renderPass,
+            1,
+            attachments,
+            swapChainImageExtent.width,
+            swapChainImageExtent.height,
+            1
+        };
+
+        result = vkCreateFramebuffer(device, &fbCreateInfo, nullptr, &swapChainFramebufferVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create framebuffer object!");
+        }
+    }
+}
+
+void Harmony::CreateCommandPoolAndBuffers() {
+    VkResult result;
+
+    VkCommandPoolCreateInfo cpCreateInfo {
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        nullptr,
+        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        choosenQueueIndices.graphicsFamily.value()
+    };
+
+    result = vkCreateCommandPool(device, &cpCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create command pool!");
+    }
+
+    VkCommandBufferAllocateInfo cbAllocInfo {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        nullptr,
+        commandPool,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        1
+    };
+
+    result = vkAllocateCommandBuffers(device, &cbAllocInfo, &cmdBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not allocate command buffer!");
+    }
+}
+
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Exit Calls
+
+void Harmony::DestroyCommandPoolAndBuffers() {
+    // cmd buffer is freed when cmd pool is destroyed
+    vkDestroyCommandPool(device, commandPool, nullptr);
+}
+
+void Harmony::DestroyFrameBuffers() {
+    for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
+        vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
+    }
+}
+
+void Harmony::DestroyGraphicsPipeline() {
+
+    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+}
+
+void Harmony::DestroyRenderPass() {
+    vkDestroyRenderPass(device, renderPass, nullptr);
+}
+
 void Harmony::DestroyImageViews() {
     for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
         vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
@@ -737,6 +1129,67 @@ void Harmony::DestroyInstance() {
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Rendering
+
+void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex) {
+    VkResult result;
+
+    VkCommandBufferBeginInfo beginInfo {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr,
+        0,
+        nullptr
+    };
+
+    result = vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not begin command buffer!");
+    }
+
+    VkClearValue clearColor;
+
+    clearColor.color = { 0.0, 0.0f, 0.0f, 1.0f};
+
+    VkRenderPassBeginInfo rpBeginInfo{
+        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        nullptr,
+        renderPass,
+        swapChainFramebufferVec[imageIndex],
+        {{0, 0}, {swapChainImageExtent.width, swapChainImageExtent.height}},
+        1,
+        &clearColor
+    };
+
+    VkViewport vp {
+        0.0f,
+        0.0f,
+        static_cast<float>(swapChainImageExtent.width),
+        static_cast<float>(swapChainImageExtent.height),
+        0.0f,
+        1.0f
+    };
+
+    VkRect2D scissor{
+        0,
+        0,
+        swapChainImageExtent.width,
+        swapChainImageExtent.height,
+    };
+
+    vkCmdBeginRenderPass(cmdBuffer, &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+
+    vkCmdSetViewport(cmdBuffer, 0, 1, &vp);
+    vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+    vkCmdDraw(cmdBuffer, 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(cmdBuffer);
+
+    result = vkEndCommandBuffer(cmdBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not end command buffer!");
+    }
+}
 
 void Harmony::Render() {
 

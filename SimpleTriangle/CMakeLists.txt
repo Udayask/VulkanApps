@@ -23,6 +23,15 @@ add_executable(SimpleTriangle WIN32 ${SourceFiles})
 
 target_link_libraries(SimpleTriangle ${Vulkan_LIBRARY})
 
+add_custom_target(CopyShaders ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${PROJECT_SOURCE_DIR}/SimpleTriangle/shaders
+    ${PROJECT_BINARY_DIR}/SimpleTriangle/shaders
+    COMMENT "Copying resources to binary directory..."
+)
+
+add_dependencies(SimpleTriangle CopyShaders)
+
 if (MSVC)
     # Tell MSVC to use main instead of WinMain for Windows subsystem executables
     set_target_properties(SimpleTriangle PROPERTIES
