@@ -53,7 +53,9 @@ private:
     void CreateGraphicsPipeline();
     void CreateFrameBuffers();
     void CreateCommandPoolAndBuffers();
+    void CreateSyncObjects();
 
+    void DestroySyncObjects();
     void DestroyCommandPoolAndBuffers();
     void DestroyFrameBuffers();
     void DestroyGraphicsPipeline();
@@ -98,7 +100,11 @@ private:
     VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
-    VkCommandBuffer          cmdBuffer           = VK_NULL_HANDLE; 
+    VkCommandBuffer          cmdBuffer           = VK_NULL_HANDLE;
+
+    VkSemaphore              imageReady          = VK_NULL_HANDLE;
+    VkSemaphore              renderComplete      = VK_NULL_HANDLE;
+    VkFence                  gpuBusyFence        = VK_NULL_HANDLE;
 
     SwapChainImageVec        swapChainImageVec;
     SwapChainImageViewVec    swapChainImageViewVec;
@@ -189,6 +195,8 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateFrameBuffers();
 
         CreateCommandPoolAndBuffers();
+
+        CreateSyncObjects();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -213,10 +221,14 @@ void Harmony::Run() {
 
         Render();
     }
+
+    vkDeviceWaitIdle(device);
 }
 
 void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
+        DestroySyncObjects();
+
         DestroyCommandPoolAndBuffers();
 
         DestroyFrameBuffers();
@@ -423,7 +435,7 @@ void Harmony::CreateSurface(HINSTANCE hinstance) {
         throw std::runtime_error("Could not create Win32 surface!");
     }
 }
-
+ 
 void Harmony::ChoosePhysicalDevice() {
     uint32_t itemCount = 0;
     VkResult result;
@@ -785,6 +797,16 @@ void Harmony::CreateRenderPass() {
         nullptr,
     };
 
+    VkSubpassDependency dependency{
+        VK_SUBPASS_EXTERNAL,
+        0,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        0
+    };
+
     VkRenderPassCreateInfo rpCreateInfo {
         VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         nullptr,
@@ -793,8 +815,8 @@ void Harmony::CreateRenderPass() {
         &renderTarget,
         1,
         &subPassDesc,
-        0,
-        nullptr
+        1,
+        &dependency
     };
 
     result = vkCreateRenderPass(device, &rpCreateInfo, nullptr, &renderPass);
@@ -1067,9 +1089,46 @@ void Harmony::CreateCommandPoolAndBuffers() {
     }
 }
 
+void Harmony::CreateSyncObjects() {
+    VkResult result;
+
+    VkSemaphoreCreateInfo smCreateInfo {
+        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        nullptr,
+        0
+    };
+
+    result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &imageReady);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create semaphore!");
+    }
+
+    result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &renderComplete);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create semaphore!");
+    }
+
+    VkFenceCreateInfo fnCreateInfo {
+        VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        nullptr,
+        VK_FENCE_CREATE_SIGNALED_BIT
+    };
+
+    result = vkCreateFence(device, &fnCreateInfo, nullptr, &gpuBusyFence);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create fence!");
+    }
+}
+
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Exit Calls
+
+void Harmony::DestroySyncObjects() {
+    vkDestroyFence(device, gpuBusyFence, nullptr);
+    vkDestroySemaphore(device, renderComplete, nullptr);
+    vkDestroySemaphore(device, imageReady, nullptr);
+}
 
 void Harmony::DestroyCommandPoolAndBuffers() {
     // cmd buffer is freed when cmd pool is destroyed
@@ -1192,7 +1251,51 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
 }
 
 void Harmony::Render() {
+    VkResult result;
+    uint32_t imageIndex;
 
+    vkWaitForFences(device, 1, &gpuBusyFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &gpuBusyFence);
+
+    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageReady, VK_NULL_HANDLE, &imageIndex);
+
+    vkResetCommandBuffer(cmdBuffer, 0);
+       RecordCommandBuffer(cmdBuffer, imageIndex);
+
+    VkSemaphore          waitSemaphores[]   = { imageReady };
+    VkSemaphore          signalSemaphores[] = { renderComplete };
+    VkPipelineStageFlags waitStages[]       = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    VkSwapchainKHR       swapChains[]       = { swapchain };
+
+    VkSubmitInfo submitInfo {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        nullptr,
+        1,
+        waitSemaphores,
+        waitStages,
+        1,
+        &cmdBuffer,
+        1,
+        signalSemaphores
+    };
+
+    result = vkQueueSubmit(graphicsQueue, 1, &submitInfo, gpuBusyFence);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not submit cmdbuffer!");
+    }
+
+    VkPresentInfoKHR presentInfo {
+        VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        nullptr,
+        1,
+        signalSemaphores,
+        1,
+        swapChains,
+        &imageIndex,
+        nullptr
+    };
+    
+    vkQueuePresentKHR(presentQueue, &presentInfo);
 }
 
 #pragma endregion
