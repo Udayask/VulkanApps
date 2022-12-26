@@ -17,6 +17,8 @@
 #pragma region ClassDecl
 class alignas(64) Harmony {
 public:
+    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+
     bool Init(HINSTANCE instance);
     void Run();
     void Shutdown(HINSTANCE instance);
@@ -82,6 +84,9 @@ private:
     using SwapChainImageVec       = std::vector<VkImage>;
     using SwapChainImageViewVec   = std::vector<VkImageView>;
     using SwapChainFramebufferVec = std::vector<VkFramebuffer>;
+    using CmdBufferVec            = std::vector<VkCommandBuffer>;
+    using SemaphoreVec            = std::vector<VkSemaphore>;
+    using FenceVec                = std::vector<VkFence>;
 
     HWND                     hMainWindow         = NULL;
 
@@ -100,15 +105,17 @@ private:
     VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
-    VkCommandBuffer          cmdBuffer           = VK_NULL_HANDLE;
 
-    VkSemaphore              imageReady          = VK_NULL_HANDLE;
-    VkSemaphore              renderComplete      = VK_NULL_HANDLE;
-    VkFence                  gpuBusyFence        = VK_NULL_HANDLE;
+    uint32_t                 currentFrame        = 0;
 
+    CmdBufferVec             cmdBufferVec;
+    SemaphoreVec             imageReadyVec;
+    SemaphoreVec             renderCompleteVec;
+    FenceVec                 gpuBusyVec;
     SwapChainImageVec        swapChainImageVec;
     SwapChainImageViewVec    swapChainImageViewVec;
     SwapChainFramebufferVec  swapChainFramebufferVec;
+
     QueueFamilyIndices       choosenQueueIndices;
 
     VkFormat                 swapChainImageFormat;
@@ -1063,6 +1070,8 @@ void Harmony::CreateFrameBuffers() {
 void Harmony::CreateCommandPoolAndBuffers() {
     VkResult result;
 
+    cmdBufferVec.resize(MAX_FRAMES_IN_FLIGHT);
+
     VkCommandPoolCreateInfo cpCreateInfo {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         nullptr,
@@ -1080,10 +1089,10 @@ void Harmony::CreateCommandPoolAndBuffers() {
         nullptr,
         commandPool,
         VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        1
+        MAX_FRAMES_IN_FLIGHT
     };
 
-    result = vkAllocateCommandBuffers(device, &cbAllocInfo, &cmdBuffer);
+    result = vkAllocateCommandBuffers(device, &cbAllocInfo, cmdBufferVec.data());
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not allocate command buffer!");
     }
@@ -1092,21 +1101,15 @@ void Harmony::CreateCommandPoolAndBuffers() {
 void Harmony::CreateSyncObjects() {
     VkResult result;
 
+    imageReadyVec.resize(MAX_FRAMES_IN_FLIGHT);
+    renderCompleteVec.resize(MAX_FRAMES_IN_FLIGHT);
+    gpuBusyVec.resize(MAX_FRAMES_IN_FLIGHT);
+
     VkSemaphoreCreateInfo smCreateInfo {
         VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         nullptr,
         0
     };
-
-    result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &imageReady);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create semaphore!");
-    }
-
-    result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &renderComplete);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create semaphore!");
-    }
 
     VkFenceCreateInfo fnCreateInfo {
         VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -1114,9 +1117,21 @@ void Harmony::CreateSyncObjects() {
         VK_FENCE_CREATE_SIGNALED_BIT
     };
 
-    result = vkCreateFence(device, &fnCreateInfo, nullptr, &gpuBusyFence);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create fence!");
+    for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
+        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &imageReadyVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create semaphore!");
+        }
+
+        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &renderCompleteVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create semaphore!");
+        }
+
+        result = vkCreateFence(device, &fnCreateInfo, nullptr, &gpuBusyVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create fence!");
+        }
     }
 }
 
@@ -1125,13 +1140,15 @@ void Harmony::CreateSyncObjects() {
 #pragma region Exit Calls
 
 void Harmony::DestroySyncObjects() {
-    vkDestroyFence(device, gpuBusyFence, nullptr);
-    vkDestroySemaphore(device, renderComplete, nullptr);
-    vkDestroySemaphore(device, imageReady, nullptr);
+    for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
+        vkDestroyFence(device, gpuBusyVec[i], nullptr);
+        vkDestroySemaphore(device, renderCompleteVec[i], nullptr);
+        vkDestroySemaphore(device, imageReadyVec[i], nullptr);
+    }
 }
 
 void Harmony::DestroyCommandPoolAndBuffers() {
-    // cmd buffer is freed when cmd pool is destroyed
+    // cmd buffers are freed when cmd pool is destroyed
     vkDestroyCommandPool(device, commandPool, nullptr);
 }
 
@@ -1142,7 +1159,6 @@ void Harmony::DestroyFrameBuffers() {
 }
 
 void Harmony::DestroyGraphicsPipeline() {
-
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 }
 
@@ -1254,8 +1270,13 @@ void Harmony::Render() {
     VkResult result;
     uint32_t imageIndex;
 
-    vkWaitForFences(device, 1, &gpuBusyFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &gpuBusyFence);
+    auto& gpuBusy        = gpuBusyVec[currentFrame];
+    auto& imageReady     = imageReadyVec[currentFrame];
+    auto& renderComplete = renderCompleteVec[currentFrame];
+    auto& cmdBuffer      = cmdBufferVec[currentFrame];
+
+    vkWaitForFences(device, 1, &gpuBusy, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &gpuBusy);
 
     vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageReady, VK_NULL_HANDLE, &imageIndex);
 
@@ -1279,7 +1300,7 @@ void Harmony::Render() {
         signalSemaphores
     };
 
-    result = vkQueueSubmit(graphicsQueue, 1, &submitInfo, gpuBusyFence);
+    result = vkQueueSubmit(graphicsQueue, 1, &submitInfo, gpuBusy);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not submit cmdbuffer!");
     }
@@ -1296,6 +1317,8 @@ void Harmony::Render() {
     };
     
     vkQueuePresentKHR(presentQueue, &presentInfo);
+
+    currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 #pragma endregion
