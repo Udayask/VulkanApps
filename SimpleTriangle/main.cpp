@@ -4,7 +4,9 @@
 #include <vulkan/vulkan.h>
 #include <iostream>
 #include <vector>
+#include <deque>
 #include <optional>
+#include <functional>
 #include <algorithm>
 #include <fstream>
 #include <map>
@@ -12,6 +14,30 @@
 #define APPLICATION_NAME        "SimpleTriangle"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+class DeletionQueue {
+    using fn = std::function<void()>;
+    using queue = std::deque<fn>;
+
+    queue dq;
+
+public:
+    void Finalize() {
+        // delete in reverse order of appends
+        for (auto it = dq.rbegin(); it != dq.rend(); it++) {
+            (*it)();
+        }
+
+        dq.clear();
+    }
+
+    template<typename Fn>
+    void Append(Fn&& f) {
+        dq.emplace_back(f);
+    }
+};
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region ClassDecl
@@ -57,18 +83,6 @@ private:
     void CreateCommandPoolAndBuffers();
     void CreateSyncObjects();
 
-    void DestroySyncObjects();
-    void DestroyCommandPoolAndBuffers();
-    void DestroyFrameBuffers();
-    void DestroyGraphicsPipeline();
-    void DestroyRenderPass();
-    void DestroyImageViews();
-    void DestroySwapChain();
-    void DestroyLogicalDevice();
-    void DestroySurface();
-    void CloseWindow(HINSTANCE instance);
-    void DestroyInstance();
-
     void RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex);
     void Render();
 
@@ -107,6 +121,8 @@ private:
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
 
     uint32_t                 currentFrame        = 0;
+
+    DeletionQueue            deletionQueue;
 
     CmdBufferVec             cmdBufferVec;
     SemaphoreVec             imageReadyVec;
@@ -214,7 +230,7 @@ bool Harmony::Init(HINSTANCE hinstance) {
 }
 
 void Harmony::Run() {
-    while (true) {
+    for (;;) {
         MSG msg;
 
         while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
@@ -234,27 +250,7 @@ void Harmony::Run() {
 
 void Harmony::Shutdown(HINSTANCE hinstance) {
     try {
-        DestroySyncObjects();
-
-        DestroyCommandPoolAndBuffers();
-
-        DestroyFrameBuffers();
-
-        DestroyGraphicsPipeline();
-
-        DestroyRenderPass();
-
-        DestroyImageViews();
-
-        DestroySwapChain();
-
-        DestroyLogicalDevice();
-
-        DestroySurface();
-
-        CloseWindow(hinstance);
-
-        DestroyInstance();
+        deletionQueue.Finalize();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -354,6 +350,11 @@ void Harmony::CreateInstance() {
         throw std::runtime_error("Could not create Vk instance!");
     }
 
+    deletionQueue.Append(
+        [cinstance = instance] {
+        vkDestroyInstance(cinstance, nullptr);
+    });
+
     if (enableValidationLayers) {
         VkDebugUtilsMessengerCreateInfoEXT createInfo{
             VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -397,6 +398,13 @@ void Harmony::OpenWindow(HINSTANCE hinstance) {
         throw std::runtime_error("Could not register class!");
     }
 
+    deletionQueue.Append(
+        [ cAppName = APPLICATION_NAME
+        , cinstance = hinstance ] {
+            UnregisterClass(cAppName, cinstance);
+        }
+    );
+
     int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
@@ -424,6 +432,12 @@ void Harmony::OpenWindow(HINSTANCE hinstance) {
     UpdateWindow(hMainWindow);
     SetForegroundWindow(hMainWindow);
     SetFocus(hMainWindow);
+
+    deletionQueue.Append(
+        [window = hMainWindow] {
+            DestroyWindow(window);
+        }
+    );
 }
 
 void Harmony::CreateSurface(HINSTANCE hinstance) {
@@ -441,6 +455,13 @@ void Harmony::CreateSurface(HINSTANCE hinstance) {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create Win32 surface!");
     }
+
+    deletionQueue.Append(
+        [ cinstance = instance
+        , csurface  = surface ] {
+            vkDestroySurfaceKHR(cinstance, csurface, nullptr);
+        }
+    );
 }
  
 void Harmony::ChoosePhysicalDevice() {
@@ -629,6 +650,12 @@ void Harmony::CreateLogicalDevice() {
         throw std::runtime_error("Could not create logical device!");
     }
 
+    deletionQueue.Append(
+        [ cdevice = device ] {
+            vkDestroyDevice(cdevice, nullptr);
+        }
+    );
+
     vkGetDeviceQueue(device, choosenQueueIndices.graphicsFamily.value(), 0, &graphicsQueue);
     vkGetDeviceQueue(device, choosenQueueIndices.presentFamily.value(), 0, &presentQueue);
 }
@@ -734,6 +761,13 @@ void Harmony::CreateSwapChain() {
         throw std::runtime_error("Could not create swap chain!");
     }
 
+    deletionQueue.Append(
+        [ cdevice = device
+        , cswapchain = swapchain ] {
+            vkDestroySwapchainKHR(cdevice, cswapchain, nullptr);
+        }
+    );
+
     result = vkGetSwapchainImagesKHR(device, swapchain, &numImages, nullptr);
     if (result == VK_SUCCESS && numImages) {
         swapChainImageVec.resize(numImages);
@@ -769,6 +803,15 @@ void Harmony::CreateImageViews() {
             throw std::runtime_error("Could not create a swap chain image view!");
         }
     }
+
+    deletionQueue.Append(
+        [&] {
+            for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
+                vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
+            }
+
+            swapChainImageViewVec.clear();
+        });
 }
 
 void Harmony::CreateRenderPass() {
@@ -804,7 +847,7 @@ void Harmony::CreateRenderPass() {
         nullptr,
     };
 
-    VkSubpassDependency dependency{
+    VkSubpassDependency dependency {
         VK_SUBPASS_EXTERNAL,
         0,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -830,6 +873,13 @@ void Harmony::CreateRenderPass() {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create renderpass object!");
     }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , crenderPass = renderPass ] {
+            vkDestroyRenderPass(cdevice, crenderPass, nullptr);
+        }
+    );
 }
 
 void Harmony::CreateGraphicsPipeline() {
@@ -924,7 +974,7 @@ void Harmony::CreateGraphicsPipeline() {
         nullptr  // specified in cmd buffer
     };
 
-    VkPipelineVertexInputStateCreateInfo vfStateCreateInfo{
+    VkPipelineVertexInputStateCreateInfo vfStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         nullptr,
         0,
@@ -934,7 +984,7 @@ void Harmony::CreateGraphicsPipeline() {
         nullptr
     };
 
-    VkPipelineInputAssemblyStateCreateInfo iaStateCreateInfo{
+    VkPipelineInputAssemblyStateCreateInfo iaStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         nullptr,
         0,
@@ -942,7 +992,7 @@ void Harmony::CreateGraphicsPipeline() {
         VK_FALSE // primitiveRestartEnable
     };
 
-    VkPipelineRasterizationStateCreateInfo rsStateCreateInfo{
+    VkPipelineRasterizationStateCreateInfo rsStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         nullptr,
         0,
@@ -958,7 +1008,7 @@ void Harmony::CreateGraphicsPipeline() {
         0.0f      // lineWidth
     };
 
-    VkPipelineMultisampleStateCreateInfo msaaStateCreateInfo{
+    VkPipelineMultisampleStateCreateInfo msaaStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         nullptr,
         0,
@@ -970,7 +1020,7 @@ void Harmony::CreateGraphicsPipeline() {
         VK_FALSE  // alphaToOneEnable
     };
 
-    VkPipelineColorBlendAttachmentState colorBlendAttachmentState{
+    VkPipelineColorBlendAttachmentState colorBlendAttachmentState {
         VK_FALSE, // blendEnable
         VK_BLEND_FACTOR_ONE,  // srcColorBlendFactor
         VK_BLEND_FACTOR_ZERO, // dstColorBlendFactor
@@ -981,7 +1031,7 @@ void Harmony::CreateGraphicsPipeline() {
         VK_COLOR_COMPONENT_A_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_R_BIT  // colorWriteMask
     };
 
-    VkPipelineColorBlendStateCreateInfo cbStateCreateInfo{
+    VkPipelineColorBlendStateCreateInfo cbStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         nullptr,
         0,
@@ -992,7 +1042,7 @@ void Harmony::CreateGraphicsPipeline() {
         { 0.0f, 0.0f, 0.0f, 0.0f }  // blend constants
     };
 
-    VkPipelineLayoutCreateInfo plCreateInfo{
+    VkPipelineLayoutCreateInfo plCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         nullptr,
         0,
@@ -1006,6 +1056,13 @@ void Harmony::CreateGraphicsPipeline() {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create pipeline layout!");
     }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , cpl = pipelineLayout ] {
+            vkDestroyPipelineLayout(cdevice, cpl, nullptr);
+        }
+    );
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1033,6 +1090,13 @@ void Harmony::CreateGraphicsPipeline() {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create graphics pipeline!");
     }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , cpipeline = graphicsPipeline ] {
+            vkDestroyPipeline(cdevice, cpipeline, nullptr);
+        }
+    );
 
     vkDestroyShaderModule(device, fShaderModule, nullptr);
     vkDestroyShaderModule(device, vShaderModule, nullptr);
@@ -1065,6 +1129,16 @@ void Harmony::CreateFrameBuffers() {
             throw std::runtime_error("Could not create framebuffer object!");
         }
     }
+
+    deletionQueue.Append(
+        [&] {
+            for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
+                vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
+            }
+
+            swapChainFramebufferVec.clear();
+        }
+    );
 }
 
 void Harmony::CreateCommandPoolAndBuffers() {
@@ -1096,6 +1170,14 @@ void Harmony::CreateCommandPoolAndBuffers() {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not allocate command buffer!");
     }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , ccommandPool = commandPool ] {
+            // cmd buffers are freed when cmd pool is destroyed
+            vkDestroyCommandPool(cdevice, ccommandPool, nullptr);
+        }
+    );
 }
 
 void Harmony::CreateSyncObjects() {
@@ -1133,72 +1215,20 @@ void Harmony::CreateSyncObjects() {
             throw std::runtime_error("Could not create fence!");
         }
     }
-}
 
-#pragma endregion
-/////////////////////////////////////////////////////////////////////////////////////////////
-#pragma region Exit Calls
+    deletionQueue.Append(
+        [&] {
+            for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
+                vkDestroyFence(device, gpuBusyVec[i], nullptr);
+                vkDestroySemaphore(device, renderCompleteVec[i], nullptr);
+                vkDestroySemaphore(device, imageReadyVec[i], nullptr);
+            }
 
-void Harmony::DestroySyncObjects() {
-    for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
-        vkDestroyFence(device, gpuBusyVec[i], nullptr);
-        vkDestroySemaphore(device, renderCompleteVec[i], nullptr);
-        vkDestroySemaphore(device, imageReadyVec[i], nullptr);
-    }
-}
-
-void Harmony::DestroyCommandPoolAndBuffers() {
-    // cmd buffers are freed when cmd pool is destroyed
-    vkDestroyCommandPool(device, commandPool, nullptr);
-}
-
-void Harmony::DestroyFrameBuffers() {
-    for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
-        vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
-    }
-}
-
-void Harmony::DestroyGraphicsPipeline() {
-    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-}
-
-void Harmony::DestroyRenderPass() {
-    vkDestroyRenderPass(device, renderPass, nullptr);
-}
-
-void Harmony::DestroyImageViews() {
-    for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
-        vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
-    }
-}
-
-void Harmony::DestroySwapChain() {
-    vkDestroySwapchainKHR(device, swapchain, nullptr);
-}
-
-void Harmony::DestroyLogicalDevice() {
-    vkDestroyDevice(device, nullptr);
-}
-
-void Harmony::DestroySurface() {
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-}
-
-void Harmony::CloseWindow(HINSTANCE hinstance) {
-    DestroyWindow(hMainWindow);
-
-    UnregisterClass(APPLICATION_NAME, hinstance);
-}
-
-void Harmony::DestroyInstance() {
-    if (enableValidationLayers) {
-        auto vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
-        if (vkDestroyDebugUtilsMessengerEXT != nullptr) {
-            vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+            gpuBusyVec.clear();
+            renderCompleteVec.clear();
+            imageReadyVec.clear();
         }
-    }
-
-    vkDestroyInstance(instance, nullptr);
+    );
 }
 
 #pragma endregion
