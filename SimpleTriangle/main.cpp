@@ -1474,7 +1474,7 @@ void Harmony::Render() {
 
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
-
+#pragma region Misc
 uint32_t Harmony::SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpFlags) {
     VkPhysicalDeviceMemoryProperties memProps{};
 
@@ -1488,7 +1488,7 @@ uint32_t Harmony::SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpFl
 
     throw std::runtime_error("Could not find suitable memory type!");
 }
-
+#pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 static void MakeConsole() {
