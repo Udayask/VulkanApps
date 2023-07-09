@@ -53,9 +53,9 @@ struct Vertex {
 };
 
 static Vertex vertices[3] = {
-    {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+    {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
     {{ 0.5f,  0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
-    {{-0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 1.0f}},
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -113,24 +113,31 @@ private:
         PresentModeKHRVec               presentModeVec;
     };
 
+    using BufferInfo = std::pair<VkBuffer, VkDeviceMemory>;
+
     void CreateInstance();
     void OpenWindow(HINSTANCE instance);
     void CreateSurface(HINSTANCE instance);
     void ChoosePhysicalDevice();
     void CreateLogicalDevice();
     void CreateSwapChain();
-    void CreateImageViews();
-    void CreateRenderPass();
-    void CreateGraphicsPipeline();
-    void CreateVertexBuffer();
-    void CreateFrameBuffers();
     void CreateCommandPoolAndBuffers();
     void CreateSyncObjects();
+    void CreateImageViews();
 
+    void CreateRenderPass();
+    void CreateVertexBuffer();
+    void CreateFrameBuffers();
+    void CreateGraphicsPipeline();
+    
     void RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex);
     void Render();
 
     uint32_t SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpfFlags);
+
+    BufferInfo CreateBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkDeviceSize size);
+
+    void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         LPARAM lParam);
@@ -164,11 +171,14 @@ private:
     VkRenderPass             renderPass          = VK_NULL_HANDLE;
     VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
-    VkBuffer                 vertexBuffer        = VK_NULL_HANDLE;
-    VkDeviceMemory           vertexBufferMemory  = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
+    VkCommandPool            commandPoolTx       = VK_NULL_HANDLE;
 
-    uint32_t                 currentFrame        = 0;
+    uint64_t                 currentFrame        = 0;
+
+    BufferInfo               vertexBufferInfo;
+    BufferInfo               indexBufferInfo;
+    BufferInfo               stagingBufferInfo;
 
     DeletionQueue            deletionQueue;
 
@@ -223,6 +233,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Harmony::DebugCallback(VkDebugUtilsMessageSeverit
 std::vector<char> Harmony::readShaderFile(const std::string& filePath) {
     std::fstream file;
     std::vector<char> fileData;
+    std::string fd;
 
     file.open(filePath, std::ios::in | std::ios::binary | std::ios::ate );
     if (!file) {
@@ -257,19 +268,19 @@ bool Harmony::Init(HINSTANCE hinstance) {
 
         CreateSwapChain();
 
+        CreateCommandPoolAndBuffers();
+
+        CreateSyncObjects();
+
         CreateImageViews();
 
         CreateRenderPass();
-
-        CreateGraphicsPipeline();
 
         CreateVertexBuffer();
 
         CreateFrameBuffers();
 
-        CreateCommandPoolAndBuffers();
-
-        CreateSyncObjects();
+        CreateGraphicsPipeline();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -730,7 +741,7 @@ void Harmony::CreateSwapChain() {
     do {
         result = vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &itemCount, sCaps.surfaceFormatVec.data());
     } while(result == VK_INCOMPLETE);
-    
+
     //
     // grab present modes
     //
@@ -831,6 +842,112 @@ void Harmony::CreateSwapChain() {
     swapChainImageExtent = extent;
 }
 
+void Harmony::CreateCommandPoolAndBuffers() {
+    VkResult result;
+
+    // graphics command pool & command buffers
+    cmdBufferVec.resize(MAX_FRAMES_IN_FLIGHT);
+
+    VkCommandPoolCreateInfo cpCreateInfo {
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        nullptr,
+        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        choosenQueueIndices.graphicsFamily.value()
+    };
+
+    result = vkCreateCommandPool(device, &cpCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create command pool!");
+    }
+
+    VkCommandBufferAllocateInfo cbAllocInfo {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        nullptr,
+        commandPool,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        MAX_FRAMES_IN_FLIGHT
+    };
+
+    result = vkAllocateCommandBuffers(device, &cbAllocInfo, cmdBufferVec.data());
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not allocate command buffer!");
+    }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , ccommandPool = commandPool ] {
+            // cmd buffers are freed when cmd pool is destroyed
+            vkDestroyCommandPool(cdevice, ccommandPool, nullptr);
+        }
+    );
+
+    // transfer command pool 
+    cpCreateInfo.queueFamilyIndex = choosenQueueIndices.transferFamily.value();
+    result = vkCreateCommandPool(device, &cpCreateInfo, nullptr, &commandPoolTx);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create transfer command pool!");
+    }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , ccommandPool = commandPoolTx ] {
+            // cmd buffers are freed when cmd pool is destroyed
+            vkDestroyCommandPool(cdevice, ccommandPool, nullptr);
+        }
+    );
+}
+
+void Harmony::CreateSyncObjects() {
+    VkResult result;
+
+    imageReadyVec.resize(MAX_FRAMES_IN_FLIGHT);
+    renderCompleteVec.resize(MAX_FRAMES_IN_FLIGHT);
+    gpuBusyVec.resize(MAX_FRAMES_IN_FLIGHT);
+
+    VkSemaphoreCreateInfo smCreateInfo {
+        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        nullptr,
+        0
+    };
+
+    VkFenceCreateInfo fnCreateInfo {
+        VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        nullptr,
+        VK_FENCE_CREATE_SIGNALED_BIT
+    };
+
+    for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
+        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &imageReadyVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create semaphore!");
+        }
+
+        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &renderCompleteVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create semaphore!");
+        }
+
+        result = vkCreateFence(device, &fnCreateInfo, nullptr, &gpuBusyVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create fence!");
+        }
+    }
+
+    deletionQueue.Append(
+        [&] {
+            for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
+                vkDestroyFence(device, gpuBusyVec[i], nullptr);
+                vkDestroySemaphore(device, renderCompleteVec[i], nullptr);
+                vkDestroySemaphore(device, imageReadyVec[i], nullptr);
+            }
+
+            gpuBusyVec.clear();
+            renderCompleteVec.clear();
+            imageReadyVec.clear();
+        }
+    );
+}
+
 void Harmony::CreateImageViews() {
     VkResult result;
 
@@ -928,6 +1045,70 @@ void Harmony::CreateRenderPass() {
         [ cdevice = device
         , crenderPass = renderPass ] {
             vkDestroyRenderPass(cdevice, crenderPass, nullptr);
+        }
+    );
+}
+
+void Harmony::CreateVertexBuffer() {
+    VkDeviceSize size  = sizeof(Vertex) * 3;
+
+    vertexBufferInfo  = CreateBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        size);
+
+    stagingBufferInfo = CreateBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        size);
+
+    {
+        void *pdata = nullptr;
+
+        VkResult result = vkMapMemory(device, stagingBufferInfo.second, 0, size, 0, &pdata);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not map memory!");
+        }
+
+        memcpy_s(pdata, size, vertices, size);
+
+        vkUnmapMemory(device, stagingBufferInfo.second);
+    }
+
+    CopyBuffer(stagingBufferInfo.first, vertexBufferInfo.first, size);
+}
+
+void Harmony::CreateFrameBuffers() {
+    VkResult result;
+
+    swapChainFramebufferVec.resize(swapChainImageViewVec.size());
+
+    for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
+        VkImageView attachments[] = {
+            swapChainImageViewVec[i]
+        };
+
+        VkFramebufferCreateInfo fbCreateInfo{
+            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            nullptr,
+            0,
+            renderPass,
+            1,
+            attachments,
+            swapChainImageExtent.width,
+            swapChainImageExtent.height,
+            1
+        };
+
+        result = vkCreateFramebuffer(device, &fbCreateInfo, nullptr, &swapChainFramebufferVec[i]);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not create framebuffer object!");
+        }
+    }
+
+    deletionQueue.Append(
+        [&] {
+            for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
+                vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
+            }
+
+            swapChainFramebufferVec.clear();
         }
     );
 }
@@ -1155,199 +1336,6 @@ void Harmony::CreateGraphicsPipeline() {
     vkDestroyShaderModule(device, vShaderModule, nullptr);
 }
 
-void Harmony::CreateVertexBuffer() {
-    VkResult result;
-
-    VkBufferCreateInfo bufferCreateInfo {
-        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        nullptr,
-        0, // flags
-        sizeof(Vertex) * 3,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_SHARING_MODE_EXCLUSIVE,
-        0,
-        nullptr
-    };
-
-    result = vkCreateBuffer(device, &bufferCreateInfo, nullptr, &vertexBuffer);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create vertex buffer!");
-    }
-
-    deletionQueue.Append(
-        [ cdevice = device
-        , vb = vertexBuffer ] {
-            vkDestroyBuffer(cdevice, vb, nullptr);
-        }
-    );
-
-    VkMemoryRequirements memRequirement{};
-    vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirement);
-
-    uint32_t index = SearchMemoryType(memRequirement.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    VkMemoryAllocateInfo allocInfo {
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        nullptr,
-        memRequirement.size,
-        index
-    };
-
-    result = vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create vertex buffer!");
-    }
-
-    deletionQueue.Append(
-        [ cdevice = device
-        , vbmem = vertexBufferMemory ] {
-            vkFreeMemory(cdevice, vbmem, nullptr);
-        }
-    );
-
-    vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
-
-    void *pdata;
-
-    result = vkMapMemory(device, vertexBufferMemory, 0, bufferCreateInfo.size, 0, &pdata);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not map memory!");
-    }
-
-    memcpy_s(pdata, bufferCreateInfo.size, vertices, bufferCreateInfo.size);
-    
-    vkUnmapMemory(device, vertexBufferMemory);
-}
-
-void Harmony::CreateFrameBuffers() {
-    VkResult result;
-
-    swapChainFramebufferVec.resize(swapChainImageViewVec.size());
-
-    for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
-        VkImageView attachments[] = {
-            swapChainImageViewVec[i]
-        };
-
-        VkFramebufferCreateInfo fbCreateInfo{
-            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            nullptr,
-            0,
-            renderPass,
-            1,
-            attachments,
-            swapChainImageExtent.width,
-            swapChainImageExtent.height,
-            1
-        };
-
-        result = vkCreateFramebuffer(device, &fbCreateInfo, nullptr, &swapChainFramebufferVec[i]);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Could not create framebuffer object!");
-        }
-    }
-
-    deletionQueue.Append(
-        [&] {
-            for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
-                vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
-            }
-
-            swapChainFramebufferVec.clear();
-        }
-    );
-}
-
-void Harmony::CreateCommandPoolAndBuffers() {
-    VkResult result;
-
-    cmdBufferVec.resize(MAX_FRAMES_IN_FLIGHT);
-
-    VkCommandPoolCreateInfo cpCreateInfo {
-        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        nullptr,
-        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        choosenQueueIndices.graphicsFamily.value()
-    };
-
-    result = vkCreateCommandPool(device, &cpCreateInfo, nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not create command pool!");
-    }
-
-    VkCommandBufferAllocateInfo cbAllocInfo {
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        nullptr,
-        commandPool,
-        VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        MAX_FRAMES_IN_FLIGHT
-    };
-
-    result = vkAllocateCommandBuffers(device, &cbAllocInfo, cmdBufferVec.data());
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not allocate command buffer!");
-    }
-
-    deletionQueue.Append(
-        [ cdevice = device
-        , ccommandPool = commandPool ] {
-            // cmd buffers are freed when cmd pool is destroyed
-            vkDestroyCommandPool(cdevice, ccommandPool, nullptr);
-        }
-    );
-}
-
-void Harmony::CreateSyncObjects() {
-    VkResult result;
-
-    imageReadyVec.resize(MAX_FRAMES_IN_FLIGHT);
-    renderCompleteVec.resize(MAX_FRAMES_IN_FLIGHT);
-    gpuBusyVec.resize(MAX_FRAMES_IN_FLIGHT);
-
-    VkSemaphoreCreateInfo smCreateInfo {
-        VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        nullptr,
-        0
-    };
-
-    VkFenceCreateInfo fnCreateInfo {
-        VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        nullptr,
-        VK_FENCE_CREATE_SIGNALED_BIT
-    };
-
-    for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
-        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &imageReadyVec[i]);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Could not create semaphore!");
-        }
-
-        result = vkCreateSemaphore(device, &smCreateInfo, nullptr, &renderCompleteVec[i]);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Could not create semaphore!");
-        }
-
-        result = vkCreateFence(device, &fnCreateInfo, nullptr, &gpuBusyVec[i]);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Could not create fence!");
-        }
-    }
-
-    deletionQueue.Append(
-        [&] {
-            for( uint32_t i =0; i < MAX_FRAMES_IN_FLIGHT; ++i ) {
-                vkDestroyFence(device, gpuBusyVec[i], nullptr);
-                vkDestroySemaphore(device, renderCompleteVec[i], nullptr);
-                vkDestroySemaphore(device, imageReadyVec[i], nullptr);
-            }
-
-            gpuBusyVec.clear();
-            renderCompleteVec.clear();
-            imageReadyVec.clear();
-        }
-    );
-}
-
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Rendering
@@ -1371,7 +1359,7 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
 
     clearColor.color = { 0.0, 0.0f, 0.0f, 1.0f};
 
-    VkRenderPassBeginInfo rpBeginInfo{
+    VkRenderPassBeginInfo rpBeginInfo {
         VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         nullptr,
         renderPass,
@@ -1398,9 +1386,10 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
     };
 
     vkCmdBeginRenderPass(cmdBuffer, &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-    VkBuffer vbs[] = { vertexBuffer };
+    VkBuffer vbs[] = { vertexBufferInfo.first };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmdBuffer, 0, 1, vbs, offsets);
 
@@ -1488,6 +1477,114 @@ uint32_t Harmony::SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpFl
 
     throw std::runtime_error("Could not find suitable memory type!");
 }
+
+Harmony::BufferInfo Harmony::CreateBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkDeviceSize size) {
+    VkBuffer        buffer       = VK_NULL_HANDLE;
+    VkDeviceMemory  deviceMem    = VK_NULL_HANDLE;
+    VkResult result;
+
+    VkBufferCreateInfo bufferCreateInfo {
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        nullptr,
+        0, // reserved
+        size,
+        usageFlags,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr
+    };
+
+    result = vkCreateBuffer(device, &bufferCreateInfo, nullptr, &buffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create buffer!");
+    }
+
+    VkMemoryRequirements memRequirement{};
+    vkGetBufferMemoryRequirements(device, buffer, &memRequirement);
+
+    uint32_t index = SearchMemoryType(memRequirement.memoryTypeBits, memPropFlags);
+
+    VkMemoryAllocateInfo allocInfo {
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        nullptr,
+        memRequirement.size,
+        index
+    };
+
+    result = vkAllocateMemory(device, &allocInfo, nullptr, &deviceMem);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create vertex buffer!");
+    }
+
+    vkBindBufferMemory(device, buffer, deviceMem, 0);
+
+    deletionQueue.Append(
+        [ cdevice    = device
+        , cdeviceMem = deviceMem
+        , cbuffer    = buffer ] {
+            vkFreeMemory(cdevice, cdeviceMem, nullptr);
+            vkDestroyBuffer(cdevice, cbuffer, nullptr);
+        }
+    );
+
+    return BufferInfo(buffer, deviceMem);
+}
+
+void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+    VkCommandBuffer cmdBuffer = VK_NULL_HANDLE;
+    VkResult result;
+
+    VkCommandBufferAllocateInfo allocInfo {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        nullptr,
+        commandPoolTx,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        1
+    };
+
+    result = vkAllocateCommandBuffers(device, &allocInfo, &cmdBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not allocate transfer commadn buffer!");
+    }
+
+    VkCommandBufferBeginInfo beginInfo {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        nullptr
+    };
+
+    vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+
+    VkBufferCopy bufferCopy{
+        0,
+        0,
+        size
+    };
+
+    vkCmdCopyBuffer(cmdBuffer, src, dst, 1, &bufferCopy);
+    vkEndCommandBuffer(cmdBuffer);
+
+    VkSubmitInfo sInfo {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
+        1,
+        &cmdBuffer,
+        0,
+        nullptr
+    };
+
+    result = vkQueueSubmit(graphicsQueue, 1, &sInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not submit transfer command buffer!");
+    }
+
+    vkQueueWaitIdle(graphicsQueue);
+}
+
 #pragma endregion
 /////////////////////////////////////////////////////////////////////////////////////////////
 
