@@ -3,8 +3,10 @@
 
 #include <vulkan/vulkan.h>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <deque>
+#include <array>
 #include <optional>
 #include <functional>
 #include <algorithm>
@@ -14,6 +16,47 @@
 #define APPLICATION_NAME        "SimpleTriangle"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+struct Vertex {
+    float position[3];
+    float color[3];
+
+    static VkVertexInputBindingDescription GetInputBindingDescription() {
+        return {
+            0, // binding
+            sizeof(Vertex), // stride
+            VK_VERTEX_INPUT_RATE_VERTEX // data is per vertex
+        };
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> GetInputAttributeDescriptionArray() {
+        std::array<VkVertexInputAttributeDescription, 2> val{};
+
+        val[0] = {
+            0, // location
+            0, // binding
+            VK_FORMAT_R32G32B32_SFLOAT,
+            offsetof(Vertex,position)
+        };
+
+        val[1] = {
+            1, // location
+            0, // binding
+            VK_FORMAT_R32G32B32_SFLOAT,
+            offsetof(Vertex,color)
+        };
+
+        return val;
+    }
+};
+
+static Vertex vertices[3] = {
+    {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+    {{ 0.5f,  0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+    {{-0.5f,  0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+};
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -79,12 +122,15 @@ private:
     void CreateImageViews();
     void CreateRenderPass();
     void CreateGraphicsPipeline();
+    void CreateVertexBuffer();
     void CreateFrameBuffers();
     void CreateCommandPoolAndBuffers();
     void CreateSyncObjects();
 
     void RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex);
     void Render();
+
+    uint32_t SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpfFlags);
 
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         LPARAM lParam);
@@ -118,6 +164,8 @@ private:
     VkRenderPass             renderPass          = VK_NULL_HANDLE;
     VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
+    VkBuffer                 vertexBuffer        = VK_NULL_HANDLE;
+    VkDeviceMemory           vertexBufferMemory  = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
 
     uint32_t                 currentFrame        = 0;
@@ -214,6 +262,8 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateRenderPass();
 
         CreateGraphicsPipeline();
+
+        CreateVertexBuffer();
 
         CreateFrameBuffers();
 
@@ -889,11 +939,11 @@ void Harmony::CreateGraphicsPipeline() {
     GetCurrentDirectory(MAX_PATH, currentDirectory);
 
     std::string vPath(currentDirectory);
-    vPath += "\\shaders\\vert.spv";
+    vPath += "\\shaders\\shader.vert.spv";
     auto vShader = readShaderFile(vPath);
 
     std::string fPath(currentDirectory);
-    fPath += "\\shaders\\frag.spv";
+    fPath += "\\shaders\\shader.frag.spv";
     auto fShader = readShaderFile(fPath);
 
     VkShaderModule vShaderModule, fShaderModule;
@@ -974,14 +1024,17 @@ void Harmony::CreateGraphicsPipeline() {
         nullptr  // specified in cmd buffer
     };
 
+    auto vertexBindingDescription = Vertex::GetInputBindingDescription();
+    auto vertexAttributeDescription = Vertex::GetInputAttributeDescriptionArray();
+
     VkPipelineVertexInputStateCreateInfo vfStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         nullptr,
         0,
-        0,  // vertexBindingDescriptionCount
-        nullptr,
-        0,  // vertexAttributeDescriptionCount,
-        nullptr
+        1,  // vertexBindingDescriptionCount
+        &vertexBindingDescription,
+        static_cast<uint32_t>(vertexAttributeDescription.size()),  // vertexAttributeDescriptionCount
+        vertexAttributeDescription.data()
     };
 
     VkPipelineInputAssemblyStateCreateInfo iaStateCreateInfo {
@@ -1100,6 +1153,70 @@ void Harmony::CreateGraphicsPipeline() {
 
     vkDestroyShaderModule(device, fShaderModule, nullptr);
     vkDestroyShaderModule(device, vShaderModule, nullptr);
+}
+
+void Harmony::CreateVertexBuffer() {
+    VkResult result;
+
+    VkBufferCreateInfo bufferCreateInfo {
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        nullptr,
+        0, // flags
+        sizeof(Vertex) * 3,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr
+    };
+
+    result = vkCreateBuffer(device, &bufferCreateInfo, nullptr, &vertexBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create vertex buffer!");
+    }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , vb = vertexBuffer ] {
+            vkDestroyBuffer(cdevice, vb, nullptr);
+        }
+    );
+
+    VkMemoryRequirements memRequirement{};
+    vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirement);
+
+    uint32_t index = SearchMemoryType(memRequirement.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    VkMemoryAllocateInfo allocInfo {
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        nullptr,
+        memRequirement.size,
+        index
+    };
+
+    result = vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create vertex buffer!");
+    }
+
+    deletionQueue.Append(
+        [ cdevice = device
+        , vbmem = vertexBufferMemory ] {
+            vkFreeMemory(cdevice, vbmem, nullptr);
+        }
+    );
+
+    vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+    void *pdata;
+
+    result = vkMapMemory(device, vertexBufferMemory, 0, bufferCreateInfo.size, 0, &pdata);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not map memory!");
+    }
+
+    memcpy_s(pdata, bufferCreateInfo.size, vertices, bufferCreateInfo.size);
+    
+    vkUnmapMemory(device, vertexBufferMemory);
 }
 
 void Harmony::CreateFrameBuffers() {
@@ -1283,6 +1400,10 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
     vkCmdBeginRenderPass(cmdBuffer, &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
+    VkBuffer vbs[] = { vertexBuffer };
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(cmdBuffer, 0, 1, vbs, offsets);
+
     vkCmdSetViewport(cmdBuffer, 0, 1, &vp);
     vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
 
@@ -1352,6 +1473,22 @@ void Harmony::Render() {
 }
 
 #pragma endregion
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+uint32_t Harmony::SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpFlags) {
+    VkPhysicalDeviceMemoryProperties memProps{};
+
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((typeBits & (1 << i)) && ((memProps.memoryTypes[i].propertyFlags & mpFlags) == mpFlags)) {
+            return i;
+        }
+    }
+
+    throw std::runtime_error("Could not find suitable memory type!");
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 static void MakeConsole() {
