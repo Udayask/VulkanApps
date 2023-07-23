@@ -52,10 +52,15 @@ struct Vertex {
     }
 };
 
-static Vertex vertices[3] = {
-    {{ 0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
-    {{ 0.5f,  0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
-    {{-0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 1.0f}},
+static Vertex vertices[4] = {
+    {{-0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+    {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{ 0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 1.0f}},
+    {{-0.5f,  0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+};
+
+static uint16_t indices[6] = {
+    0, 1, 2, 2, 3, 0
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -127,6 +132,7 @@ private:
 
     void CreateRenderPass();
     void CreateVertexBuffer();
+    void CreateIndexBuffer();
     void CreateFrameBuffers();
     void CreateGraphicsPipeline();
     
@@ -136,6 +142,7 @@ private:
     uint32_t SearchMemoryType(uint32_t typeBits, VkMemoryPropertyFlags mpfFlags);
 
     BufferInfo CreateBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkDeviceSize size);
+    void DestroyBuffer(BufferInfo& buffInfo, bool defer = false);
 
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
@@ -178,7 +185,6 @@ private:
 
     BufferInfo               vertexBufferInfo;
     BufferInfo               indexBufferInfo;
-    BufferInfo               stagingBufferInfo;
 
     DeletionQueue            deletionQueue;
 
@@ -277,6 +283,8 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateRenderPass();
 
         CreateVertexBuffer();
+
+        CreateIndexBuffer();
 
         CreateFrameBuffers();
 
@@ -617,7 +625,10 @@ void Harmony::ChoosePhysicalDevice() {
 
         vkGetPhysicalDeviceProperties(pd, &deviceProps);
         if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            score += 1000;
+            score += 1500;
+        }
+        else if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+            score += 500;
         }
 
         vkGetPhysicalDeviceFeatures(pd, &deviceFeats);
@@ -1050,12 +1061,15 @@ void Harmony::CreateRenderPass() {
 }
 
 void Harmony::CreateVertexBuffer() {
-    VkDeviceSize size  = sizeof(Vertex) * 3;
+    VkDeviceSize size  = sizeof(Vertex) * 4;
 
     vertexBufferInfo  = CreateBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         size);
 
-    stagingBufferInfo = CreateBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+    // destroy when app exits
+    DestroyBuffer(vertexBufferInfo, true);
+
+    auto stagingBufferInfo = CreateBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
         size);
 
     {
@@ -1072,6 +1086,38 @@ void Harmony::CreateVertexBuffer() {
     }
 
     CopyBuffer(stagingBufferInfo.first, vertexBufferInfo.first, size);
+
+    DestroyBuffer(stagingBufferInfo, false);
+}
+
+void Harmony::CreateIndexBuffer() {
+    VkDeviceSize size = sizeof(uint16_t) * 6;
+
+    indexBufferInfo = CreateBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        size);
+
+    // destroy when app exits
+    DestroyBuffer(indexBufferInfo, true);
+
+    auto stagingBufferInfo = CreateBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        size);
+
+    {
+        void *pdata = nullptr;
+
+        VkResult result = vkMapMemory(device, stagingBufferInfo.second, 0, size, 0, &pdata);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Could not map memory!");
+        }
+
+        memcpy_s(pdata, size, indices, size);
+
+        vkUnmapMemory(device, stagingBufferInfo.second);
+    }
+
+    CopyBuffer(stagingBufferInfo.first, indexBufferInfo.first, size);
+
+    DestroyBuffer(stagingBufferInfo);
 }
 
 void Harmony::CreateFrameBuffers() {
@@ -1276,6 +1322,18 @@ void Harmony::CreateGraphicsPipeline() {
         { 0.0f, 0.0f, 0.0f, 0.0f }  // blend constants
     };
 
+    VkPipelineMultisampleStateCreateInfo msStateCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_SAMPLE_COUNT_1_BIT ,
+        VK_FALSE,
+        0.0f,
+        nullptr,
+        VK_FALSE,
+        VK_FALSE
+    };
+
     VkPipelineLayoutCreateInfo plCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         nullptr,
@@ -1309,7 +1367,7 @@ void Harmony::CreateGraphicsPipeline() {
         nullptr,
         &vpStateCreateInfo,
         &rsStateCreateInfo,
-        nullptr,
+        &msStateCreateInfo,
         nullptr,
         &cbStateCreateInfo,
         &dynStateCreateInfo,
@@ -1393,10 +1451,12 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmdBuffer, 0, 1, vbs, offsets);
 
+    vkCmdBindIndexBuffer(cmdBuffer, indexBufferInfo.first, 0, VkIndexType::VK_INDEX_TYPE_UINT16);
+
     vkCmdSetViewport(cmdBuffer, 0, 1, &vp);
     vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
 
-    vkCmdDraw(cmdBuffer, 3, 1, 0, 0);
+    vkCmdDrawIndexed(cmdBuffer, 6, 1, 0, 0, 0);
 
     vkCmdEndRenderPass(cmdBuffer);
 
@@ -1518,16 +1578,25 @@ Harmony::BufferInfo Harmony::CreateBuffer(VkBufferUsageFlags usageFlags, VkMemor
 
     vkBindBufferMemory(device, buffer, deviceMem, 0);
 
-    deletionQueue.Append(
-        [ cdevice    = device
-        , cdeviceMem = deviceMem
-        , cbuffer    = buffer ] {
-            vkFreeMemory(cdevice, cdeviceMem, nullptr);
-            vkDestroyBuffer(cdevice, cbuffer, nullptr);
-        }
-    );
-
     return BufferInfo(buffer, deviceMem);
+}
+
+void Harmony::DestroyBuffer(BufferInfo& buffInfo, bool defer) {
+    auto deleter = 
+        [ cdevice    = device
+        , cdeviceMem = buffInfo.second
+        , cbuffer    = buffInfo.first ]
+    {
+        vkFreeMemory(cdevice, cdeviceMem, nullptr);
+        vkDestroyBuffer(cdevice, cbuffer, nullptr);
+    };
+
+    if (defer) {
+        deletionQueue.Append(deleter);
+    }
+    else {
+        deleter();
+    }
 }
 
 void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
