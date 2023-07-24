@@ -96,6 +96,7 @@ public:
     bool Init(HINSTANCE instance);
     void Run();
     void Shutdown(HINSTANCE instance);
+    void Resize();
 
 private:
     struct QueueFamilyIndices {
@@ -146,6 +147,8 @@ private:
 
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
+    void OnWindowSizeChanged();
+
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         LPARAM lParam);
 
@@ -180,6 +183,8 @@ private:
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
     VkCommandPool            commandPoolTx       = VK_NULL_HANDLE;
+
+    VkBool32                 windowResized       = VK_FALSE;
 
     uint64_t                 currentFrame        = 0;
 
@@ -220,6 +225,15 @@ LRESULT CALLBACK Harmony::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
         PostQuitMessage(0);         // close the application entirely
         return 0;
     };
+
+    case WM_SIZE:
+        {
+            Harmony* pApp = reinterpret_cast<Harmony* >(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+            if( pApp) {
+                pApp->Resize();
+                return 0;
+            }
+        };
     }
 
     return DefWindowProc(hWnd, msg, wParam, lParam);
@@ -324,6 +338,10 @@ void Harmony::Shutdown(HINSTANCE hinstance) {
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
     }
+}
+
+void Harmony::Resize() {
+    windowResized = VK_TRUE;
 }
 
 #pragma endregion
@@ -507,6 +525,8 @@ void Harmony::OpenWindow(HINSTANCE hinstance) {
             DestroyWindow(window);
         }
     );
+
+    SetWindowLongPtr(hMainWindow, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 }
 
 void Harmony::CreateSurface(HINSTANCE hinstance) {
@@ -1476,9 +1496,15 @@ void Harmony::Render() {
     auto& cmdBuffer      = cmdBufferVec[currentFrame];
 
     vkWaitForFences(device, 1, &gpuBusy, VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &gpuBusy);
+    
+    result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageReady, VK_NULL_HANDLE, &imageIndex);
+    if( result == VK_ERROR_OUT_OF_DATE_KHR || windowResized == VK_TRUE) {
+        OnWindowSizeChanged();
+        return;
+    }
 
-    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageReady, VK_NULL_HANDLE, &imageIndex);
+    // reset the fence only if we are submitting work to GPU
+    vkResetFences(device, 1, &gpuBusy);
 
     vkResetCommandBuffer(cmdBuffer, 0);
        RecordCommandBuffer(cmdBuffer, imageIndex);
@@ -1516,7 +1542,11 @@ void Harmony::Render() {
         nullptr
     };
     
-    vkQueuePresentKHR(presentQueue, &presentInfo);
+    result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    if( result == VK_ERROR_OUT_OF_DATE_KHR || windowResized == VK_TRUE) {
+        OnWindowSizeChanged();
+        return;
+    }
 
     currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
@@ -1652,6 +1682,28 @@ void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
     }
 
     vkQueueWaitIdle(graphicsQueue);
+}
+
+void Harmony::OnWindowSizeChanged() {
+    vkDeviceWaitIdle(device);
+
+    {
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyFramebuffer(device, swapChainFramebufferVec[i], nullptr);
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+    }
+
+    CreateSwapChain();
+    CreateImageViews();
+    CreateFrameBuffers();
+
+    windowResized = VK_FALSE;
 }
 
 #pragma endregion
