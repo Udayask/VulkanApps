@@ -12,6 +12,11 @@
 #include <algorithm>
 #include <fstream>
 #include <map>
+#include <chrono>
+
+#define GLM_FORCE_RADIANS
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #define APPLICATION_NAME        "SimpleTriangle"
 #define WINDOW_WIDTH            1920
@@ -61,6 +66,10 @@ static Vertex vertices[4] = {
 
 static uint16_t indices[6] = {
     0, 1, 2, 2, 3, 0
+};
+
+struct UniformBufferObject {
+    glm::mat4 mvp;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -119,7 +128,11 @@ private:
         PresentModeKHRVec               presentModeVec;
     };
 
-    using BufferInfo = std::pair<VkBuffer, VkDeviceMemory>;
+    struct BufferInfo {
+        VkBuffer        buffer = VK_NULL_HANDLE;
+        VkDeviceMemory  memory = VK_NULL_HANDLE;
+        void*           cpuVA  = nullptr; 
+    };
 
     void CreateInstance();
     void OpenWindow(HINSTANCE instance);
@@ -134,9 +147,14 @@ private:
     void CreateRenderPass();
     void CreateVertexBuffer();
     void CreateIndexBuffer();
+    void CreateUniformBuffer();
+    void CreateDescriptorPoolAndSets();
+
     void CreateFrameBuffers();
+    void CreateDescriptorSetLayout();
     void CreateGraphicsPipeline();
     
+    void UpdateUbo(uint32_t imageIndex);
     void RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex);
     void Render();
 
@@ -164,7 +182,9 @@ private:
     using CmdBufferVec            = std::vector<VkCommandBuffer>;
     using SemaphoreVec            = std::vector<VkSemaphore>;
     using FenceVec                = std::vector<VkFence>;
-
+    using DescriptorSetVec        = std::vector<VkDescriptorSet>;
+    using UboVec                  = std::vector<BufferInfo>;
+    
     HWND                     hMainWindow         = NULL;
 
     VkDebugUtilsMessengerEXT debugMessenger      = VK_NULL_HANDLE;
@@ -179,10 +199,12 @@ private:
     VkQueue                  presentQueue        = VK_NULL_HANDLE;
 
     VkRenderPass             renderPass          = VK_NULL_HANDLE;
+    VkDescriptorSetLayout    descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout         pipelineLayout      = VK_NULL_HANDLE;
     VkPipeline               graphicsPipeline    = VK_NULL_HANDLE;
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
     VkCommandPool            commandPoolTx       = VK_NULL_HANDLE;
+    VkDescriptorPool         descriptorPool      = VK_NULL_HANDLE;
 
     VkBool32                 windowResized       = VK_FALSE;
 
@@ -197,9 +219,12 @@ private:
     SemaphoreVec             imageReadyVec;
     SemaphoreVec             renderCompleteVec;
     FenceVec                 gpuBusyVec;
+    DescriptorSetVec         descSetVec;
     SwapChainImageVec        swapChainImageVec;
     SwapChainImageViewVec    swapChainImageViewVec;
     SwapChainFramebufferVec  swapChainFramebufferVec;
+
+    UboVec                   uboVec;
 
     QueueFamilyIndices       choosenQueueIndices;
 
@@ -300,7 +325,13 @@ bool Harmony::Init(HINSTANCE hinstance) {
 
         CreateIndexBuffer();
 
+        CreateUniformBuffer();
+
         CreateFrameBuffers();
+
+        CreateDescriptorSetLayout();
+
+        CreateDescriptorPoolAndSets();
 
         CreateGraphicsPipeline();
     }
@@ -1095,17 +1126,17 @@ void Harmony::CreateVertexBuffer() {
     {
         void *pdata = nullptr;
 
-        VkResult result = vkMapMemory(device, stagingBufferInfo.second, 0, size, 0, &pdata);
+        VkResult result = vkMapMemory(device, stagingBufferInfo.memory, 0, size, 0, &pdata);
         if (result != VK_SUCCESS) {
             throw std::runtime_error("Could not map memory!");
         }
 
         memcpy_s(pdata, size, vertices, size);
 
-        vkUnmapMemory(device, stagingBufferInfo.second);
+        vkUnmapMemory(device, stagingBufferInfo.memory);
     }
 
-    CopyBuffer(stagingBufferInfo.first, vertexBufferInfo.first, size);
+    CopyBuffer(stagingBufferInfo.buffer, vertexBufferInfo.buffer, size);
 
     DestroyBuffer(stagingBufferInfo, false);
 }
@@ -1125,19 +1156,108 @@ void Harmony::CreateIndexBuffer() {
     {
         void *pdata = nullptr;
 
-        VkResult result = vkMapMemory(device, stagingBufferInfo.second, 0, size, 0, &pdata);
+        VkResult result = vkMapMemory(device, stagingBufferInfo.memory, 0, size, 0, &pdata);
         if (result != VK_SUCCESS) {
             throw std::runtime_error("Could not map memory!");
         }
 
         memcpy_s(pdata, size, indices, size);
 
-        vkUnmapMemory(device, stagingBufferInfo.second);
+        vkUnmapMemory(device, stagingBufferInfo.memory);
     }
 
-    CopyBuffer(stagingBufferInfo.first, indexBufferInfo.first, size);
+    CopyBuffer(stagingBufferInfo.buffer, indexBufferInfo.buffer, size);
 
     DestroyBuffer(stagingBufferInfo);
+}
+
+void Harmony::CreateUniformBuffer() {
+    uboVec.resize(MAX_FRAMES_IN_FLIGHT);
+    
+    VkDeviceSize uboSize = sizeof(glm::mat4);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        auto info = CreateBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboSize);
+
+        vkMapMemory(device, info.memory, 0, uboSize, 0, &info.cpuVA);
+
+        uboVec[i] = info;
+
+        // delete at app exit
+        DestroyBuffer(info, true);
+    }
+}
+
+void Harmony::CreateDescriptorPoolAndSets() {
+    VkResult result;
+
+    VkDescriptorPoolSize poolSize {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        MAX_FRAMES_IN_FLIGHT
+    };
+
+    VkDescriptorPoolCreateInfo createInfo {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        nullptr,
+        0,
+        MAX_FRAMES_IN_FLIGHT,
+        1,
+        &poolSize
+    };
+
+    result = vkCreateDescriptorPool(device, &createInfo, nullptr, &descriptorPool);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create descriptor pool!");
+    }
+
+    deletionQueue.Append(
+        [cdevice = device,
+        cpool = descriptorPool]
+        {
+            vkDestroyDescriptorPool(cdevice, cpool, nullptr);
+        }
+    );
+
+    descSetVec.resize(MAX_FRAMES_IN_FLIGHT);
+
+    std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+
+    VkDescriptorSetAllocateInfo allocInfo {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        nullptr,
+        descriptorPool,
+        MAX_FRAMES_IN_FLIGHT,
+        layouts.data()
+    };
+
+    result = vkAllocateDescriptorSets(device, &allocInfo, descSetVec.data());
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not allocate descriptor sets!");
+    }
+
+    // init descriptor sets
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        VkDescriptorBufferInfo buffInfo {
+            uboVec[i].buffer,
+            0,
+            VK_WHOLE_SIZE 
+        };
+
+        VkWriteDescriptorSet writeDesc {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            descSetVec[i],
+            0,
+            0,
+            1,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            nullptr,
+            &buffInfo,
+            nullptr
+        };
+
+        vkUpdateDescriptorSets(device, 1, &writeDesc, 0, nullptr);
+    }
 }
 
 void Harmony::CreateFrameBuffers() {
@@ -1175,6 +1295,39 @@ void Harmony::CreateFrameBuffers() {
             }
 
             swapChainFramebufferVec.clear();
+        }
+    );
+}
+
+void Harmony::CreateDescriptorSetLayout() {
+    VkResult result;
+
+    VkDescriptorSetLayoutBinding layoutBinding {
+        0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        1,
+        VK_SHADER_STAGE_ALL,
+        nullptr
+    };
+
+    VkDescriptorSetLayoutCreateInfo dsCreateInfo {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        nullptr,
+        0,
+        1,
+        &layoutBinding
+    };
+
+    result = vkCreateDescriptorSetLayout(device, &dsCreateInfo, nullptr, &descriptorSetLayout);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create descriptor set layout");
+    }
+
+    deletionQueue.Append(
+        [ cdevice = device,
+          clayout = descriptorSetLayout ]
+        {
+            vkDestroyDescriptorSetLayout(cdevice , clayout, nullptr);
         }
     );
 }
@@ -1299,7 +1452,7 @@ void Harmony::CreateGraphicsPipeline() {
         VK_FALSE, // depthClampEnable
         VK_FALSE, // rasterizerDiscardEnable - we render to RT
         VkPolygonMode::VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
+        VK_CULL_MODE_NONE,
         VK_FRONT_FACE_CLOCKWISE,
         VK_FALSE, // depthBiasEnable
         0.0f,     // depthBiasConstantFactor
@@ -1358,8 +1511,8 @@ void Harmony::CreateGraphicsPipeline() {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         nullptr,
         0,
-        0,       // setLayoutCOunt
-        nullptr, // pSetLayouts
+        1,       // setLayoutCOunt
+        &descriptorSetLayout, // pSetLayouts
         0,       // pushConstantRangeCount
         nullptr, // pPushConstantRanges
     };
@@ -1418,6 +1571,23 @@ void Harmony::CreateGraphicsPipeline() {
 /////////////////////////////////////////////////////////////////////////////////////////////
 #pragma region Rendering
 
+void Harmony::UpdateUbo(uint32_t imageIndex) {
+    static auto epoch = std::chrono::high_resolution_clock::now();
+
+    auto current = std::chrono::high_resolution_clock::now();
+    float time   = std::chrono::duration<float, std::chrono::seconds::period>( current - epoch ).count();
+
+    auto model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    auto view  = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    auto proj  = glm::perspective(glm::radians(45.0f), float(swapChainImageExtent.width) / swapChainImageExtent.height, 0.1f, 10.0f);
+
+    proj[1][1] *= -1;
+
+    UniformBufferObject mvp = { proj * view * model };
+
+    memcpy_s( uboVec[imageIndex].cpuVA, sizeof(mvp), &mvp, sizeof(mvp));
+}
+
 void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex) {
     VkResult result;
 
@@ -1467,14 +1637,16 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
 
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-    VkBuffer vbs[] = { vertexBufferInfo.first };
+    VkBuffer vbs[] = { vertexBufferInfo.buffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmdBuffer, 0, 1, vbs, offsets);
 
-    vkCmdBindIndexBuffer(cmdBuffer, indexBufferInfo.first, 0, VkIndexType::VK_INDEX_TYPE_UINT16);
+    vkCmdBindIndexBuffer(cmdBuffer, indexBufferInfo.buffer, 0, VkIndexType::VK_INDEX_TYPE_UINT16);
 
     vkCmdSetViewport(cmdBuffer, 0, 1, &vp);
     vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSetVec[imageIndex], 0, nullptr);
 
     vkCmdDrawIndexed(cmdBuffer, 6, 1, 0, 0, 0);
 
@@ -1507,6 +1679,7 @@ void Harmony::Render() {
     vkResetFences(device, 1, &gpuBusy);
 
     vkResetCommandBuffer(cmdBuffer, 0);
+       UpdateUbo(imageIndex);
        RecordCommandBuffer(cmdBuffer, imageIndex);
 
     VkSemaphore          waitSemaphores[]   = { imageReady };
@@ -1608,17 +1781,20 @@ Harmony::BufferInfo Harmony::CreateBuffer(VkBufferUsageFlags usageFlags, VkMemor
 
     vkBindBufferMemory(device, buffer, deviceMem, 0);
 
-    return BufferInfo(buffer, deviceMem);
+    return BufferInfo{ buffer, deviceMem, nullptr };
 }
 
 void Harmony::DestroyBuffer(BufferInfo& buffInfo, bool defer) {
     auto deleter = 
-        [ cdevice    = device
-        , cdeviceMem = buffInfo.second
-        , cbuffer    = buffInfo.first ]
+        [ cdevice  = device
+        , info     = buffInfo ]
     {
-        vkFreeMemory(cdevice, cdeviceMem, nullptr);
-        vkDestroyBuffer(cdevice, cbuffer, nullptr);
+        if (info.cpuVA) {
+            vkUnmapMemory(cdevice, info.memory);
+        }
+
+        vkFreeMemory(cdevice, info.memory, nullptr);
+        vkDestroyBuffer(cdevice, info.buffer, nullptr);
     };
 
     if (defer) {
