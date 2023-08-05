@@ -57,15 +57,19 @@ struct Vertex {
     }
 };
 
-static Vertex vertices[4] = {
-    {{-0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
-    {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
-    {{ 0.5f,  0.5f, 0.0f}, {0.0f, 1.0f, 1.0f}},
-    {{-0.5f,  0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+static Vertex vertices[5] = {
+    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}},
+    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}}
 };
 
-static uint16_t indices[6] = {
-    0, 1, 2, 2, 3, 0
+static uint16_t indices[12] = {
+    0, 4, 1,
+    1, 4, 2,
+    2, 4, 3,
+    3, 4, 0
 };
 
 struct UniformBufferObject {
@@ -232,7 +236,7 @@ private:
     VkExtent2D               swapChainImageExtent;
 
 #ifdef _DEBUG
-    static inline const bool enableValidationLayers = true;
+    static inline const bool enableValidationLayers = false;
 #else
     static inline const bool enableValidationLayers = false;
 #endif
@@ -336,6 +340,7 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateGraphicsPipeline();
     }
     catch (std::runtime_error& err) {
+        MessageBox(0, err.what(), "Error!", MB_OK);
         std::cerr << err.what() << std::endl;
         return false;
     }
@@ -383,7 +388,7 @@ void Harmony::CreateInstance() {
     uint32_t itemCount = 0;
     VkResult result;
 
-    std::vector<const char*> requiredLayers = {
+    std::vector<const char*> optionalLayers = {
         "VK_LAYER_KHRONOS_validation",
         "VK_LAYER_KHRONOS_synchronization2"
     };
@@ -398,7 +403,7 @@ void Harmony::CreateInstance() {
             result = vkEnumerateInstanceLayerProperties(&itemCount, layPropsVec.data());
         } while (result == VK_INCOMPLETE);
 
-        for (auto& r : requiredLayers) {
+        for (auto& r : optionalLayers) {
             for (auto& lay : layPropsVec) {
                 if (std::string(lay.layerName) == r) {
                     enabledLayers.emplace_back(r);
@@ -407,7 +412,7 @@ void Harmony::CreateInstance() {
         }
     }
 
-    if (enabledLayers.size() != requiredLayers.size()) {
+    if (enabledLayers.size() != optionalLayers.size()) {
         std::cerr << "Warning! Could not find all requiured layers..." << std::endl;
     }
 
@@ -1112,7 +1117,7 @@ void Harmony::CreateRenderPass() {
 }
 
 void Harmony::CreateVertexBuffer() {
-    VkDeviceSize size  = sizeof(Vertex) * 4;
+    VkDeviceSize size  = sizeof(Vertex) * 5;
 
     vertexBufferInfo  = CreateBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         size);
@@ -1142,7 +1147,7 @@ void Harmony::CreateVertexBuffer() {
 }
 
 void Harmony::CreateIndexBuffer() {
-    VkDeviceSize size = sizeof(uint16_t) * 6;
+    VkDeviceSize size = sizeof(uint16_t) * 12;
 
     indexBufferInfo = CreateBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         size);
@@ -1452,8 +1457,8 @@ void Harmony::CreateGraphicsPipeline() {
         VK_FALSE, // depthClampEnable
         VK_FALSE, // rasterizerDiscardEnable - we render to RT
         VkPolygonMode::VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_NONE,
-        VK_FRONT_FACE_CLOCKWISE,
+        VK_CULL_MODE_BACK_BIT,
+        VK_FRONT_FACE_COUNTER_CLOCKWISE,
         VK_FALSE, // depthBiasEnable
         0.0f,     // depthBiasConstantFactor
         0.0f,     // depthBiasClamp
@@ -1577,13 +1582,35 @@ void Harmony::UpdateUbo(uint32_t imageIndex) {
     auto current = std::chrono::high_resolution_clock::now();
     float time   = std::chrono::duration<float, std::chrono::seconds::period>( current - epoch ).count();
 
-    auto model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    auto view  = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    auto proj  = glm::perspective(glm::radians(45.0f), float(swapChainImageExtent.width) / swapChainImageExtent.height, 0.1f, 10.0f);
+    auto model = glm::rotate(
+        glm::mat4(1.0f),            // identity
+        time * glm::radians(90.0f), // angle
+        glm::vec3(0.0f, 1.0f, 0.0f) // which axis to rotate?
+    );
 
-    proj[1][1] *= -1;
+    auto view  = glm::lookAt(
+        glm::vec3(0.0f, 0.25f, -2.0f), // eye position 
+        glm::vec3(0.0f, 0.0f, 0.0f),  // looking at 
+        glm::vec3(0.0f, 1.0f, 0.0f)   // up vector
+    );
 
-    UniformBufferObject mvp = { proj * view * model };
+    auto proj  = glm::perspective(
+        glm::radians(70.0f),         // fov
+        float(swapChainImageExtent.width) / swapChainImageExtent.height, // aspect ratio
+        0.1f,                       // near 
+        20.0f                       // far
+    );
+
+    // https://github.com/LunarG/VulkanSamples/blob/master/Sample-Programs/Hologram/Hologram.cpp
+    // vulkan has inverted Y and half Z
+    const glm::mat4 clip = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0, -1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.5f, 0.5f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+
+    UniformBufferObject mvp = { clip * proj * view * model };
 
     memcpy_s( uboVec[imageIndex].cpuVA, sizeof(mvp), &mvp, sizeof(mvp));
 }
@@ -1648,7 +1675,7 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
 
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSetVec[imageIndex], 0, nullptr);
 
-    vkCmdDrawIndexed(cmdBuffer, 6, 1, 0, 0, 0);
+    vkCmdDrawIndexed(cmdBuffer, 12, 1, 0, 0, 0);
 
     vkCmdEndRenderPass(cmdBuffer);
 
