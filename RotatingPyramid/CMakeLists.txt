@@ -35,23 +35,23 @@ set(SourceFiles
 "main.cpp" 
 )
 
-add_executable(SimpleTriangle WIN32 ${SourceFiles} ${Shaders})
+add_executable(RotatingPyramid WIN32 ${SourceFiles} ${Shaders})
 
-target_link_libraries(SimpleTriangle ${Vulkan_LIBRARY})
+target_link_libraries(RotatingPyramid ${Vulkan_LIBRARY})
 
 add_custom_target(CopyShaders ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${PROJECT_SOURCE_DIR}/SimpleTriangle/shaders
-    ${PROJECT_BINARY_DIR}/SimpleTriangle/shaders
+    ${PROJECT_SOURCE_DIR}/RotatingPyramid/shaders
+    ${PROJECT_BINARY_DIR}/RotatingPyramid/shaders
     COMMENT "Copying resources to binary directory..."
 )
 
 add_dependencies(CopyShaders Shaders)
-add_dependencies(SimpleTriangle CopyShaders)
+add_dependencies(RotatingPyramid CopyShaders)
 
 if (MSVC)
     # Tell MSVC to use main instead of WinMain for Windows subsystem executables
-    set_target_properties(SimpleTriangle PROPERTIES
+    set_target_properties(RotatingPyramid PROPERTIES
                           LINK_FLAGS "/ENTRY:mainCRTStartup")
 endif()
 
