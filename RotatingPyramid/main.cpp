@@ -73,7 +73,11 @@ static uint16_t indices[12] = {
 };
 
 struct UniformBufferObject {
-    glm::mat4 mvp;
+    glm::mat4 model;
+};
+
+struct PushConstant {
+    glm::mat4 viewProj;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -229,6 +233,7 @@ private:
     SwapChainFramebufferVec  swapChainFramebufferVec;
 
     UboVec                   uboVec;
+    std::array<PushConstant, MAX_FRAMES_IN_FLIGHT>  pushConstantVec;
 
     QueueFamilyIndices       choosenQueueIndices;
 
@@ -644,8 +649,16 @@ void Harmony::ChoosePhysicalDevice() {
 
     // device rate lambda
     auto rateDevice = [&](VkPhysicalDevice pd, QueueFamilyIndices& indices) -> int {
-        VkPhysicalDeviceProperties  deviceProps;
-        VkPhysicalDeviceFeatures    deviceFeats;
+        VkPhysicalDeviceProperties2 deviceProps {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            nullptr
+        };
+
+        VkPhysicalDeviceFeatures2   deviceFeats {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            nullptr
+        };
+
         uint32_t                    itemCount = 0;
         VkResult                    result;
 
@@ -679,16 +692,20 @@ void Harmony::ChoosePhysicalDevice() {
 
         int score = 0;
 
-        vkGetPhysicalDeviceProperties(pd, &deviceProps);
-        if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        vkGetPhysicalDeviceProperties2(pd, &deviceProps);
+        if (deviceProps.properties.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
             score += 1500;
         }
-        else if (deviceProps.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+        else if (deviceProps.properties.deviceType == VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
             score += 500;
         }
 
-        vkGetPhysicalDeviceFeatures(pd, &deviceFeats);
-        if (deviceFeats.multiDrawIndirect) {
+        if (deviceProps.properties.limits.maxPushConstantsSize < sizeof(PushConstant)) {
+            score = 0;
+        }
+
+        vkGetPhysicalDeviceFeatures2(pd, &deviceFeats);
+        if (deviceFeats.features.multiDrawIndirect) {
             score += 200;
         }
 
@@ -1512,14 +1529,20 @@ void Harmony::CreateGraphicsPipeline() {
         VK_FALSE
     };
 
+    VkPushConstantRange pushConstantRange {
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(PushConstant)
+    };
+
     VkPipelineLayoutCreateInfo plCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         nullptr,
         0,
-        1,       // setLayoutCOunt
+        1,                    // setLayoutCOunt
         &descriptorSetLayout, // pSetLayouts
-        0,       // pushConstantRangeCount
-        nullptr, // pPushConstantRanges
+        1,                    // pushConstantRangeCount
+        &pushConstantRange,   // pPushConstantRanges
     };
 
     result = vkCreatePipelineLayout(device, &plCreateInfo, nullptr, &pipelineLayout);
@@ -1610,9 +1633,9 @@ void Harmony::UpdateUbo(uint32_t imageIndex) {
         0.0f, 0.0f, 0.0f, 1.0f
     };
 
-    UniformBufferObject mvp = { clip * proj * view * model };
+    pushConstantVec[imageIndex] = { clip * proj * view };
 
-    memcpy_s( uboVec[imageIndex].cpuVA, sizeof(mvp), &mvp, sizeof(mvp));
+    memcpy_s( uboVec[imageIndex].cpuVA, sizeof(model), &model, sizeof(model));
 }
 
 void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex) {
@@ -1674,6 +1697,8 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
     vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
 
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSetVec[imageIndex], 0, nullptr);
+
+    vkCmdPushConstants(cmdBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstant), &pushConstantVec[imageIndex]);
 
     vkCmdDrawIndexed(cmdBuffer, 12, 1, 0, 0, 0);
 
