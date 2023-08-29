@@ -37,17 +37,18 @@ set(SourceFiles
 
 add_executable(RotatingPyramid WIN32 ${SourceFiles} ${Shaders})
 
+target_include_directories(RotatingPyramid PRIVATE ${CMAKE_SOURCE_DIR}/deps/stb)
+
 target_link_libraries(RotatingPyramid ${Vulkan_LIBRARY})
 
-add_custom_target(CopyShaders ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${PROJECT_SOURCE_DIR}/RotatingPyramid/shaders
-    ${PROJECT_BINARY_DIR}/RotatingPyramid/shaders
+add_custom_target(CopyResources ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/RotatingPyramid/shaders ${PROJECT_BINARY_DIR}/RotatingPyramid/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/RotatingPyramid/textures ${PROJECT_BINARY_DIR}/RotatingPyramid/textures
     COMMENT "Copying resources to binary directory..."
 )
 
-add_dependencies(CopyShaders Shaders)
-add_dependencies(RotatingPyramid CopyShaders)
+add_dependencies(CopyResources Shaders)
+add_dependencies(RotatingPyramid CopyResources)
 
 if (MSVC)
     # Tell MSVC to use main instead of WinMain for Windows subsystem executables

@@ -18,6 +18,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #define APPLICATION_NAME        "SimpleTriangle"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
@@ -142,6 +145,12 @@ private:
         void*           cpuVA  = nullptr; 
     };
 
+    struct ImageInfo {
+        VkImage         image  = VK_NULL_HANDLE;
+        VkDeviceMemory  memory = VK_NULL_HANDLE;
+        VkImageView     view   = VK_NULL_HANDLE;
+    };
+
     void CreateInstance();
     void OpenWindow(HINSTANCE instance);
     void CreateSurface(HINSTANCE instance);
@@ -153,9 +162,12 @@ private:
     void CreateImageViews();
 
     void CreateRenderPass();
-    void CreateVertexBuffer();
-    void CreateIndexBuffer();
     void CreateUniformBuffer();
+    void CreateVertexBuffer(VkCommandBuffer cmdBuffer);
+    void CreateIndexBuffer(VkCommandBuffer cmdBuffer);
+    void CreateTextureImageAndView(VkCommandBuffer cmdBuffer);
+    void CreateTextureSampler();
+
     void CreateDescriptorPoolAndSets();
 
     void CreateFrameBuffers();
@@ -170,8 +182,18 @@ private:
 
     BufferInfo CreateBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkDeviceSize size);
     void DestroyBuffer(BufferInfo& buffInfo, bool defer = false);
+    
+    ImageInfo CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, uint32_t width, uint32_t height);
+    void DestroyImage(ImageInfo& imgInfo, bool defer=false);
 
-    void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+    void CopyBuffer(VkCommandBuffer cmdBuffer, VkBuffer src, VkBuffer dst, VkDeviceSize size);
+    void CopyBufferToImage(VkCommandBuffer cmdBuffer, VkBuffer src, VkImage image, uint32_t width, uint32_t height);
+    void TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
+
+    VkCommandBuffer BeginOneTimeCommands();
+    void EndOneTimeCommands(VkCommandBuffer cmdBuffer);
+
+    VkImageView CreateImageView(VkImage image, VkFormat imageFormat);
 
     void OnWindowSizeChanged();
 
@@ -213,6 +235,7 @@ private:
     VkCommandPool            commandPool         = VK_NULL_HANDLE;
     VkCommandPool            commandPoolTx       = VK_NULL_HANDLE;
     VkDescriptorPool         descriptorPool      = VK_NULL_HANDLE;
+    VkSampler                sampler             = VK_NULL_HANDLE;
 
     VkBool32                 windowResized       = VK_FALSE;
 
@@ -220,6 +243,8 @@ private:
 
     BufferInfo               vertexBufferInfo;
     BufferInfo               indexBufferInfo;
+    ImageInfo                textureInfo;
+
 
     DeletionQueue            deletionQueue;
 
@@ -235,13 +260,15 @@ private:
     UboVec                   uboVec;
     std::array<PushConstant, MAX_FRAMES_IN_FLIGHT>  pushConstantVec;
 
-    QueueFamilyIndices       choosenQueueIndices;
-
+    QueueFamilyIndices          choosenQueueIndices;
+    VkPhysicalDeviceProperties2 chosenDeviceProps;
+    VkPhysicalDeviceFeatures2   choosenDeviceFeatures;
+    
     VkFormat                 swapChainImageFormat;
     VkExtent2D               swapChainImageExtent;
 
 #ifdef _DEBUG
-    static inline const bool enableValidationLayers = false;
+    static inline const bool enableValidationLayers = true;
 #else
     static inline const bool enableValidationLayers = false;
 #endif
@@ -330,9 +357,21 @@ bool Harmony::Init(HINSTANCE hinstance) {
 
         CreateRenderPass();
 
-        CreateVertexBuffer();
+        ////////////////////////////////////
+        // resources
+        auto cmdBuffer = BeginOneTimeCommands();
 
-        CreateIndexBuffer();
+        CreateVertexBuffer(cmdBuffer);
+
+        CreateIndexBuffer(cmdBuffer);
+
+        CreateTextureImageAndView(cmdBuffer);
+
+        EndOneTimeCommands(cmdBuffer);
+
+        ////////////////////////////////////
+
+        CreateTextureSampler();
 
         CreateUniformBuffer();
 
@@ -460,7 +499,7 @@ void Harmony::CreateInstance() {
         1,
         "Harmony",
         1,
-        VK_MAKE_API_VERSION(0, 1, 0, VK_HEADER_VERSION)
+        VK_MAKE_API_VERSION(0, 1, 3, VK_HEADER_VERSION)
     };
 
     VkInstanceCreateInfo instanceInfo {
@@ -648,7 +687,7 @@ void Harmony::ChoosePhysicalDevice() {
     };
 
     // device rate lambda
-    auto rateDevice = [&](VkPhysicalDevice pd, QueueFamilyIndices& indices) -> int {
+    auto rateDevice = [&](VkPhysicalDevice pd, QueueFamilyIndices& indices, VkPhysicalDeviceProperties2 &props, VkPhysicalDeviceFeatures2 &feats) -> int {
         VkPhysicalDeviceProperties2 deviceProps {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
             nullptr
@@ -709,6 +748,9 @@ void Harmony::ChoosePhysicalDevice() {
             score += 200;
         }
 
+        props = deviceProps;
+        feats = deviceFeats;
+
         return score;
     };
 
@@ -718,8 +760,10 @@ void Harmony::ChoosePhysicalDevice() {
     }
 
     struct DeviceAndQueueInfo {
-        VkPhysicalDevice   physicalDevice;
-        QueueFamilyIndices indices;
+        VkPhysicalDevice            physicalDevice;
+        VkPhysicalDeviceProperties2 deviceProps;
+        VkPhysicalDeviceFeatures2   deviceFeats;
+        QueueFamilyIndices          indices;
     };
 
     std::vector<VkPhysicalDevice>     physDeviceVec(itemCount);
@@ -730,11 +774,13 @@ void Harmony::ChoosePhysicalDevice() {
     } while (result == VK_INCOMPLETE);
 
     for (auto& physicalDevice : physDeviceVec) {
-        QueueFamilyIndices indices = {};
+        QueueFamilyIndices indices{};
+        VkPhysicalDeviceProperties2 props{};
+        VkPhysicalDeviceFeatures2 feats{};
 
-        int score = rateDevice(physicalDevice, indices);
+        int score = rateDevice(physicalDevice, indices, props, feats);
 
-        deviceMap[score] = { physicalDevice, indices };
+        deviceMap[score] = { physicalDevice, props, feats, indices };
     }
 
     if (deviceMap.empty()) {
@@ -743,8 +789,10 @@ void Harmony::ChoosePhysicalDevice() {
 
     DeviceAndQueueInfo myDevice = deviceMap.rbegin()->second;
 
-    physicalDevice      = myDevice.physicalDevice;
-    choosenQueueIndices = myDevice.indices;
+    physicalDevice        = myDevice.physicalDevice;
+    choosenQueueIndices   = myDevice.indices;
+    chosenDeviceProps     = myDevice.deviceProps;
+    choosenDeviceFeatures = myDevice.deviceFeats;
 }
 
 void Harmony::CreateLogicalDevice() {
@@ -787,7 +835,7 @@ void Harmony::CreateLogicalDevice() {
         nullptr,                     // deprecated
         static_cast<uint32_t>(requiredExtensions.size()),
         requiredExtensions.data(),   // device extensions
-        nullptr                      // default features 
+        &choosenDeviceFeatures.features,
     };
 
     result = vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device);
@@ -1033,26 +1081,10 @@ void Harmony::CreateSyncObjects() {
 }
 
 void Harmony::CreateImageViews() {
-    VkResult result;
-
     swapChainImageViewVec.resize(swapChainImageVec.size());
 
     for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
-        VkImageViewCreateInfo createInfo {
-            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            nullptr,
-            0,
-            swapChainImageVec[i],
-            VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
-            swapChainImageFormat,
-            { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
-            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
-        };
-
-        result = vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViewVec[i]);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Could not create a swap chain image view!");
-        }
+        swapChainImageViewVec[i] = CreateImageView(swapChainImageVec[i], swapChainImageFormat);
     }
 
     deletionQueue.Append(
@@ -1133,7 +1165,24 @@ void Harmony::CreateRenderPass() {
     );
 }
 
-void Harmony::CreateVertexBuffer() {
+void Harmony::CreateUniformBuffer() {
+    uboVec.resize(MAX_FRAMES_IN_FLIGHT);
+
+    VkDeviceSize uboSize = sizeof(glm::mat4);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        auto info = CreateBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboSize);
+
+        vkMapMemory(device, info.memory, 0, uboSize, 0, &info.cpuVA);
+
+        uboVec[i] = info;
+
+        // delete at app exit
+        DestroyBuffer(info, true);
+    }
+}
+
+void Harmony::CreateVertexBuffer(VkCommandBuffer cmdBuffer) {
     VkDeviceSize size  = sizeof(Vertex) * 5;
 
     vertexBufferInfo  = CreateBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -1158,12 +1207,12 @@ void Harmony::CreateVertexBuffer() {
         vkUnmapMemory(device, stagingBufferInfo.memory);
     }
 
-    CopyBuffer(stagingBufferInfo.buffer, vertexBufferInfo.buffer, size);
+    CopyBuffer(cmdBuffer, stagingBufferInfo.buffer, vertexBufferInfo.buffer, size);
 
-    DestroyBuffer(stagingBufferInfo, false);
+    DestroyBuffer(stagingBufferInfo, true);
 }
 
-void Harmony::CreateIndexBuffer() {
+void Harmony::CreateIndexBuffer(VkCommandBuffer cmdBuffer) {
     VkDeviceSize size = sizeof(uint16_t) * 12;
 
     indexBufferInfo = CreateBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -1188,26 +1237,84 @@ void Harmony::CreateIndexBuffer() {
         vkUnmapMemory(device, stagingBufferInfo.memory);
     }
 
-    CopyBuffer(stagingBufferInfo.buffer, indexBufferInfo.buffer, size);
+    CopyBuffer(cmdBuffer, stagingBufferInfo.buffer, indexBufferInfo.buffer, size);
 
-    DestroyBuffer(stagingBufferInfo);
+    DestroyBuffer(stagingBufferInfo, true);
 }
 
-void Harmony::CreateUniformBuffer() {
-    uboVec.resize(MAX_FRAMES_IN_FLIGHT);
-    
-    VkDeviceSize uboSize = sizeof(glm::mat4);
+void Harmony::CreateTextureImageAndView(VkCommandBuffer cmdBuffer) {
+    int texWidth, texHeight, texChannels;
+    VkResult result;
 
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        auto info = CreateBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uboSize);
-
-        vkMapMemory(device, info.memory, 0, uboSize, 0, &info.cpuVA);
-
-        uboVec[i] = info;
-
-        // delete at app exit
-        DestroyBuffer(info, true);
+    stbi_uc* pPixels = stbi_load("textures/checkerboard.png", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    if (!pPixels) {
+        throw std::runtime_error("Could noit load texture!");
     }
+
+    VkDeviceSize imageSize = texWidth * texHeight * 4; // RGBA 
+
+    auto stagingBuffer = CreateBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, imageSize);
+
+    void *stagingPtr = nullptr;
+    result = vkMapMemory(device, stagingBuffer.memory, 0, imageSize, 0, &stagingPtr);
+    if (result == VK_SUCCESS) {
+        memcpy_s(stagingPtr, imageSize, pPixels, imageSize);
+        vkUnmapMemory(device, stagingBuffer.memory);
+    }
+    else {
+        throw std::runtime_error("Could not map staging memory!");
+    }
+
+    stbi_image_free(pPixels);
+
+    textureInfo = CreateImage(VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, texWidth, texHeight); 
+    DestroyImage(textureInfo, true);
+
+    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    CopyBufferToImage(cmdBuffer, stagingBuffer.buffer, textureInfo.image, texWidth, texHeight);
+    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+
+
+
+    DestroyBuffer(stagingBuffer, true);
+}
+
+void Harmony::CreateTextureSampler() {
+    VkResult result;
+
+    VkSamplerCreateInfo createInfo {
+        VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        nullptr,
+        0, // flags
+        VK_FILTER_LINEAR,
+        VK_FILTER_LINEAR,
+        VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        0.0f,
+        VK_TRUE,
+        chosenDeviceProps.properties.limits.maxSamplerAnisotropy,
+        VK_FALSE,
+        VK_COMPARE_OP_ALWAYS,
+        0.0f,
+        0.0f,
+        VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        VK_FALSE
+    };
+
+    result = vkCreateSampler(device, &createInfo, nullptr, &sampler);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create sampler object!");
+    }
+
+    deletionQueue.Append(
+        [cdevice = device
+        , csampler = sampler] {
+            vkDestroySampler(cdevice, csampler, nullptr);
+        }
+    );
 }
 
 void Harmony::CreateDescriptorPoolAndSets() {
@@ -1611,6 +1718,10 @@ void Harmony::UpdateUbo(uint32_t imageIndex) {
         glm::vec3(0.0f, 1.0f, 0.0f) // which axis to rotate?
     );
 
+    float yDisplacement = (glm::sin(time * 5) * 0.25f) - 0.25f;
+
+    model = glm::translate(model, glm::vec3(0.0f, yDisplacement, 0.0f));
+
     auto view  = glm::lookAt(
         glm::vec3(0.0f, 0.25f, -2.0f), // eye position 
         glm::vec3(0.0f, 0.0f, 0.0f),  // looking at 
@@ -1857,9 +1968,155 @@ void Harmony::DestroyBuffer(BufferInfo& buffInfo, bool defer) {
     }
 }
 
-void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
-    VkCommandBuffer cmdBuffer = VK_NULL_HANDLE;
+void Harmony::CopyBuffer(VkCommandBuffer cmdBuffer, VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+    VkBufferCopy bufferCopy {
+        0,
+        0,
+        size
+    };
+
+    vkCmdCopyBuffer(cmdBuffer, src, dst, 1, &bufferCopy);
+}
+
+void Harmony::CopyBufferToImage(VkCommandBuffer cmdBuffer, VkBuffer src, VkImage image, uint32_t width, uint32_t height) {
+    VkBufferImageCopy region {
+        0, // bufferOffset
+        0, // bufferRowLength
+        0, // bufferImageHeight
+        {  // imageSubresource
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0,
+            0,
+            1,
+        },
+        VkOffset3D{ 0, 0, 0 },
+        VkExtent3D{ width, height, 1}
+    };
+
+    vkCmdCopyBufferToImage(cmdBuffer, src, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+}
+
+void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+    VkPipelineStageFlags srcStageFlags = 0;
+    VkPipelineStageFlags dstStageFlags = 0;
+
+    VkImageSubresourceRange range {
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        0, // mip
+        1, // count
+        0, // array
+        1  // count
+    };
+
+    VkImageMemoryBarrier barrier {
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        nullptr,
+        0,
+        0,
+        oldLayout,
+        newLayout,
+        VK_QUEUE_FAMILY_IGNORED,
+        VK_QUEUE_FAMILY_IGNORED,
+        image,
+        range,
+    };
+
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        
+        srcStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    }
+
+    vkCmdPipelineBarrier(cmdBuffer,
+        srcStageFlags,
+        dstStageFlags,
+        0,
+        0,  nullptr,
+        0,  nullptr,
+        1, &barrier);
+}
+
+Harmony::ImageInfo Harmony::CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, uint32_t width, uint32_t height) {
+    VkDeviceMemory memory;
+    VkImage        image;
+    VkResult       result;
+
+    VkImageCreateInfo createInfo {
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        nullptr,
+        0, // flags
+        VK_IMAGE_TYPE_2D,
+        format,
+        VkExtent3D { width, height, 1 },
+        1,
+        1,
+        VK_SAMPLE_COUNT_1_BIT,
+        tiling,
+        usageFlags,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0,
+        nullptr,
+        VK_IMAGE_LAYOUT_UNDEFINED
+    };
+
+    result = vkCreateImage(device, &createInfo, nullptr, &image);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create image!");
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(device, image, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo {
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        nullptr,
+        memRequirements.size,
+        SearchMemoryType(memRequirements.memoryTypeBits, memPropFlags)
+    };
+
+    result = vkAllocateMemory(device, &allocInfo, nullptr, &memory);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not allocate image memory!");
+    }
+
+    result = vkBindImageMemory(device, image, memory, 0);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not bind image memory!");
+    }
+
+    return {image, memory, CreateImageView(image, format) };
+}
+
+void Harmony::DestroyImage(ImageInfo& imgInfo, bool defer) {
+    auto deleter = 
+        [ cdevice  = device
+        , info     = imgInfo ]
+    {
+        vkDestroyImageView(cdevice, info.view, nullptr);
+        vkFreeMemory(cdevice, info.memory, nullptr);
+        vkDestroyImage(cdevice, info.image, nullptr);
+    };
+
+    if (defer) {
+        deletionQueue.Append(deleter);
+    }
+    else {
+        deleter();
+    }
+}
+
+VkCommandBuffer Harmony::BeginOneTimeCommands() {
     VkResult result;
+    VkCommandBuffer cmdBuffer;
 
     VkCommandBufferAllocateInfo allocInfo {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1871,28 +2128,33 @@ void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
 
     result = vkAllocateCommandBuffers(device, &allocInfo, &cmdBuffer);
     if (result != VK_SUCCESS) {
-        throw std::runtime_error("Could not allocate transfer commadn buffer!");
+        throw std::runtime_error("Could not allocate commandbuffer!");
     }
 
-    VkCommandBufferBeginInfo beginInfo {
+    VkCommandBufferBeginInfo beginInfo{
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         nullptr,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         nullptr
     };
 
-    vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    result = vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not begin commandbuffer!");
+    }
 
-    VkBufferCopy bufferCopy{
-        0,
-        0,
-        size
-    };
+    return cmdBuffer;
+}
 
-    vkCmdCopyBuffer(cmdBuffer, src, dst, 1, &bufferCopy);
-    vkEndCommandBuffer(cmdBuffer);
+void Harmony::EndOneTimeCommands(VkCommandBuffer cmdBuffer) {
+    VkResult result;
 
-    VkSubmitInfo sInfo {
+    result = vkEndCommandBuffer(cmdBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not end commandbuffer!");
+    }
+
+    VkSubmitInfo submitInfo { 
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
         0,
@@ -1904,12 +2166,36 @@ void Harmony::CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
         nullptr
     };
 
-    result = vkQueueSubmit(graphicsQueue, 1, &sInfo, VK_NULL_HANDLE);
+    result = vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not submit transfer command buffer!");
     }
 
     vkQueueWaitIdle(graphicsQueue);
+    vkFreeCommandBuffers(device, commandPoolTx, 1, &cmdBuffer);
+}
+
+VkImageView Harmony::CreateImageView(VkImage image, VkFormat imageFormat) {
+    VkImageView imageView;
+    VkResult result;
+
+    VkImageViewCreateInfo createInfo {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        nullptr,
+        0,
+        image,
+        VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+        imageFormat,
+        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+    };
+
+    result = vkCreateImageView(device, &createInfo, nullptr, &imageView);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Could not create a swap chain image view!");
+    }
+
+    return imageView;
 }
 
 void Harmony::OnWindowSizeChanged() {
