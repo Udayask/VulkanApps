@@ -15,6 +15,7 @@
 #include <chrono>
 
 #define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -30,6 +31,7 @@
 struct Vertex {
     float position[3];
     float color[3];
+    float texCoord[2];
 
     static VkVertexInputBindingDescription GetInputBindingDescription() {
         return {
@@ -39,8 +41,8 @@ struct Vertex {
         };
     }
 
-    static std::array<VkVertexInputAttributeDescription, 2> GetInputAttributeDescriptionArray() {
-        std::array<VkVertexInputAttributeDescription, 2> val{};
+    static std::array<VkVertexInputAttributeDescription, 3> GetInputAttributeDescriptionArray() {
+        std::array<VkVertexInputAttributeDescription, 3> val{};
 
         val[0] = {
             0, // location
@@ -56,23 +58,40 @@ struct Vertex {
             offsetof(Vertex,color)
         };
 
+        val[2] = {
+            2, // location
+            0, // binding
+            VK_FORMAT_R32G32_SFLOAT,
+            offsetof(Vertex,texCoord)
+        };
+
         return val;
     }
 };
 
-static Vertex vertices[5] = {
-    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}},
-    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}},
-    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}}
+static Vertex vertices[12] = {
+    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+
+    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}, {0.0f, 0.0f}},
+
+    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},             
+    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+
+    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},             
+    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
 };
 
 static uint16_t indices[12] = {
-    0, 4, 1,
-    1, 4, 2,
-    2, 4, 3,
-    3, 4, 0
+    0,  1,  2,
+    3,  4,  5,
+    6,  7,  8,
+    9, 10, 11
 };
 
 struct UniformBufferObject {
@@ -167,6 +186,7 @@ private:
     void CreateIndexBuffer(VkCommandBuffer cmdBuffer);
     void CreateTextureImageAndView(VkCommandBuffer cmdBuffer);
     void CreateTextureSampler();
+    void CreateDepthImageAndView();
 
     void CreateDescriptorPoolAndSets();
 
@@ -183,17 +203,19 @@ private:
     BufferInfo CreateBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkDeviceSize size);
     void DestroyBuffer(BufferInfo& buffInfo, bool defer = false);
     
-    ImageInfo CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, uint32_t width, uint32_t height);
+    ImageInfo CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkImageAspectFlags aspectFlags, uint32_t width, uint32_t height);
     void DestroyImage(ImageInfo& imgInfo, bool defer=false);
 
     void CopyBuffer(VkCommandBuffer cmdBuffer, VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void CopyBufferToImage(VkCommandBuffer cmdBuffer, VkBuffer src, VkImage image, uint32_t width, uint32_t height);
-    void TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
+    void TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, VkImageLayout oldLayout, VkImageLayout newLayout);
 
     VkCommandBuffer BeginOneTimeCommands();
     void EndOneTimeCommands(VkCommandBuffer cmdBuffer);
 
-    VkImageView CreateImageView(VkImage image, VkFormat imageFormat);
+    VkImageView CreateImageView(VkImage image, VkFormat imageFormat, VkImageAspectFlags aspectFlags);
+
+    VkFormat findSuitableFormat(const std::vector<VkFormat>& formats, VkImageTiling tiling, VkFormatFeatureFlags features);
 
     void OnWindowSizeChanged();
 
@@ -203,6 +225,10 @@ private:
     static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, 
         VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData);
+
+    static bool HasStencilComponent(VkFormat format) {
+        return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+    }
 
     static std::vector<char> readShaderFile(const std::string& filePath);
 
@@ -244,7 +270,7 @@ private:
     BufferInfo               vertexBufferInfo;
     BufferInfo               indexBufferInfo;
     ImageInfo                textureInfo;
-
+    ImageInfo                depthInfo;
 
     DeletionQueue            deletionQueue;
 
@@ -265,6 +291,7 @@ private:
     VkPhysicalDeviceFeatures2   choosenDeviceFeatures;
     
     VkFormat                 swapChainImageFormat;
+    VkFormat                 depthFormat;
     VkExtent2D               swapChainImageExtent;
 
 #ifdef _DEBUG
@@ -354,6 +381,8 @@ bool Harmony::Init(HINSTANCE hinstance) {
         CreateSyncObjects();
 
         CreateImageViews();
+
+        CreateDepthImageAndView();
 
         CreateRenderPass();
 
@@ -1084,7 +1113,7 @@ void Harmony::CreateImageViews() {
     swapChainImageViewVec.resize(swapChainImageVec.size());
 
     for (size_t i = 0; i < swapChainImageViewVec.size(); ++i) {
-        swapChainImageViewVec[i] = CreateImageView(swapChainImageVec[i], swapChainImageFormat);
+        swapChainImageViewVec[i] = CreateImageView(swapChainImageVec[i], swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
     deletionQueue.Append(
@@ -1106,15 +1135,32 @@ void Harmony::CreateRenderPass() {
         VK_SAMPLE_COUNT_1_BIT,                   // samples 
         VK_ATTACHMENT_LOAD_OP_CLEAR,             // clear on load  
         VK_ATTACHMENT_STORE_OP_STORE,            // store to mem on exit of pass
-        VK_ATTACHMENT_LOAD_OP_DONT_CARE,         // not using depth stencil
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,        // not using depth stencil 
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE,         // not using stencil
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,        // not using stencil 
         VK_IMAGE_LAYOUT_UNDEFINED,               // don't care what layout was before
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR          // transition to present 
     };
 
-    VkAttachmentReference rtAttachmentRef {
+    VkAttachmentDescription depthTarget {
+        0,
+        depthFormat,
+        VK_SAMPLE_COUNT_1_BIT,                   // samples 
+        VK_ATTACHMENT_LOAD_OP_CLEAR,             // clear on load  
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,        // don't care what happens to depth values after pass
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE,         // not using stencil
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,        // not using stencil 
+        VK_IMAGE_LAYOUT_UNDEFINED,               // don't care what layout was before
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL          // transition to depth stencil
+    };
+
+    VkAttachmentReference renderTargetAttachmentRef {
         0,                                       // attachment is referred to at layout = 0 in shader
         VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL       // accessed optimally
+    };
+
+    VkAttachmentReference depthAttachmentRef {
+        1,                                                  // attachment is referred to at layout = 0 in shader
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL    // accessed optimally
     };
 
     VkSubpassDescription subPassDesc {
@@ -1123,9 +1169,9 @@ void Harmony::CreateRenderPass() {
         0,                    // 0 input attachments
         nullptr,
         1,                    // 1 color attachments
-        &rtAttachmentRef, 
+        &renderTargetAttachmentRef, 
         nullptr,              // no msaa
-        nullptr,              // no depth stencil
+        &depthAttachmentRef,  // one and only depth stencil
         0,                    // nothing to preserve
         nullptr,
     };
@@ -1133,19 +1179,21 @@ void Harmony::CreateRenderPass() {
     VkSubpassDependency dependency {
         VK_SUBPASS_EXTERNAL,
         0,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
         0,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         0
     };
+
+    std::array<VkAttachmentDescription, 2> attachments = {renderTarget, depthTarget};
 
     VkRenderPassCreateInfo rpCreateInfo {
         VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         nullptr,
         0,
-        1,
-        &renderTarget,
+        static_cast<uint32_t>(attachments.size()),
+        attachments.data(),
         1,
         &subPassDesc,
         1,
@@ -1183,7 +1231,7 @@ void Harmony::CreateUniformBuffer() {
 }
 
 void Harmony::CreateVertexBuffer(VkCommandBuffer cmdBuffer) {
-    VkDeviceSize size  = sizeof(Vertex) * 5;
+    VkDeviceSize size  = sizeof vertices;
 
     vertexBufferInfo  = CreateBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         size);
@@ -1267,17 +1315,28 @@ void Harmony::CreateTextureImageAndView(VkCommandBuffer cmdBuffer) {
 
     stbi_image_free(pPixels);
 
-    textureInfo = CreateImage(VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, texWidth, texHeight); 
+    textureInfo = CreateImage(VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_ASPECT_COLOR_BIT, texWidth, texHeight); 
     DestroyImage(textureInfo, true);
 
-    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     CopyBufferToImage(cmdBuffer, stagingBuffer.buffer, textureInfo.image, texWidth, texHeight);
-    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-
-
+    TransitionImage(cmdBuffer, textureInfo.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     DestroyBuffer(stagingBuffer, true);
+}
+
+void Harmony::CreateDepthImageAndView() {
+    depthFormat = findSuitableFormat(
+        {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+
+    depthInfo = CreateImage(depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, swapChainImageExtent.width, swapChainImageExtent.height);
+    DestroyImage(depthInfo, true);
+
+    auto cmdBuffer = BeginOneTimeCommands();
+    TransitionImage(cmdBuffer, depthInfo.image, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    EndOneTimeCommands(cmdBuffer);
 }
 
 void Harmony::CreateTextureSampler() {
@@ -1320,9 +1379,11 @@ void Harmony::CreateTextureSampler() {
 void Harmony::CreateDescriptorPoolAndSets() {
     VkResult result;
 
-    VkDescriptorPoolSize poolSize {
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        MAX_FRAMES_IN_FLIGHT
+    std::array<VkDescriptorPoolSize, 2> poolSizes = {
+        {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT }
+        }
     };
 
     VkDescriptorPoolCreateInfo createInfo {
@@ -1330,8 +1391,8 @@ void Harmony::CreateDescriptorPoolAndSets() {
         nullptr,
         0,
         MAX_FRAMES_IN_FLIGHT,
-        1,
-        &poolSize
+        2,
+        poolSizes.data()
     };
 
     result = vkCreateDescriptorPool(device, &createInfo, nullptr, &descriptorPool);
@@ -1372,20 +1433,41 @@ void Harmony::CreateDescriptorPoolAndSets() {
             VK_WHOLE_SIZE 
         };
 
-        VkWriteDescriptorSet writeDesc {
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            nullptr,
-            descSetVec[i],
-            0,
-            0,
-            1,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            nullptr,
-            &buffInfo,
-            nullptr
+        VkDescriptorImageInfo imageInfo {
+            sampler,
+            textureInfo.view,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         };
 
-        vkUpdateDescriptorSets(device, 1, &writeDesc, 0, nullptr);
+        std::array<VkWriteDescriptorSet, 2> writeDescs = {
+            {
+                {
+                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    nullptr,
+                    descSetVec[i],
+                    0,
+                    0,
+                    1,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    nullptr,
+                    &buffInfo,
+                    nullptr
+                },
+                {
+                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    nullptr,
+                    descSetVec[i],
+                    1,
+                    0,
+                    1,
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    &imageInfo,
+                    nullptr,
+                    nullptr
+                }
+        } };
+
+        vkUpdateDescriptorSets(device, 2, writeDescs.data(), 0, nullptr);
     }
 }
 
@@ -1396,7 +1478,8 @@ void Harmony::CreateFrameBuffers() {
 
     for (size_t i = 0; i < swapChainFramebufferVec.size(); ++i) {
         VkImageView attachments[] = {
-            swapChainImageViewVec[i]
+            swapChainImageViewVec[i],
+            depthInfo.view
         };
 
         VkFramebufferCreateInfo fbCreateInfo{
@@ -1404,7 +1487,7 @@ void Harmony::CreateFrameBuffers() {
             nullptr,
             0,
             renderPass,
-            1,
+            2,
             attachments,
             swapChainImageExtent.width,
             swapChainImageExtent.height,
@@ -1431,7 +1514,7 @@ void Harmony::CreateFrameBuffers() {
 void Harmony::CreateDescriptorSetLayout() {
     VkResult result;
 
-    VkDescriptorSetLayoutBinding layoutBinding {
+    VkDescriptorSetLayoutBinding uboLayoutBinding {
         0,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         1,
@@ -1439,12 +1522,22 @@ void Harmony::CreateDescriptorSetLayout() {
         nullptr
     };
 
+    VkDescriptorSetLayoutBinding samplerLayoutBinding {
+        1,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        1,
+        VK_SHADER_STAGE_ALL,
+        nullptr
+    };
+
+    std::array<VkDescriptorSetLayoutBinding, 2> layoutBinding = { uboLayoutBinding, samplerLayoutBinding };
+
     VkDescriptorSetLayoutCreateInfo dsCreateInfo {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         nullptr,
         0,
-        1,
-        &layoutBinding
+        2,
+        layoutBinding.data()
     };
 
     result = vkCreateDescriptorSetLayout(device, &dsCreateInfo, nullptr, &descriptorSetLayout);
@@ -1590,16 +1683,31 @@ void Harmony::CreateGraphicsPipeline() {
         0.0f      // lineWidth
     };
 
-    VkPipelineMultisampleStateCreateInfo msaaStateCreateInfo {
+    VkPipelineMultisampleStateCreateInfo msStateCreateInfo {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         nullptr,
         0,
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_FALSE, // sampleShadingEnable
-        1.0f,     // minSampleShading
-        nullptr,  // pSampleMask
-        VK_FALSE, // alphaToCoverageEnable 
-        VK_FALSE  // alphaToOneEnable
+        VK_SAMPLE_COUNT_1_BIT ,
+        VK_FALSE,
+        0.0f,
+        nullptr,
+        VK_FALSE,
+        VK_FALSE
+    };
+
+    VkPipelineDepthStencilStateCreateInfo dsStateCreateInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        nullptr,
+        0,
+        VK_TRUE,              // depth test enable
+        VK_TRUE,              // depth write enable
+        VK_COMPARE_OP_LESS,
+        VK_FALSE,             // depth bounds test
+        VK_FALSE,             // stencil
+        {},                   // front 
+        {},                   // & back stencil op
+        0.0f,                 // min depth bound
+        1.0f                  // max depth bound
     };
 
     VkPipelineColorBlendAttachmentState colorBlendAttachmentState {
@@ -1622,18 +1730,6 @@ void Harmony::CreateGraphicsPipeline() {
         1,                  // attachment count
         &colorBlendAttachmentState,
         { 0.0f, 0.0f, 0.0f, 0.0f }  // blend constants
-    };
-
-    VkPipelineMultisampleStateCreateInfo msStateCreateInfo {
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        nullptr,
-        0,
-        VK_SAMPLE_COUNT_1_BIT ,
-        VK_FALSE,
-        0.0f,
-        nullptr,
-        VK_FALSE,
-        VK_FALSE
     };
 
     VkPushConstantRange pushConstantRange {
@@ -1676,7 +1772,7 @@ void Harmony::CreateGraphicsPipeline() {
         &vpStateCreateInfo,
         &rsStateCreateInfo,
         &msStateCreateInfo,
-        nullptr,
+        &dsStateCreateInfo,
         &cbStateCreateInfo,
         &dynStateCreateInfo,
         pipelineLayout,
@@ -1723,7 +1819,7 @@ void Harmony::UpdateUbo(uint32_t imageIndex) {
     model = glm::translate(model, glm::vec3(0.0f, yDisplacement, 0.0f));
 
     auto view  = glm::lookAt(
-        glm::vec3(0.0f, 0.25f, -2.0f), // eye position 
+        glm::vec3(0.0f, 0.25f, -1.0f), // eye position 
         glm::vec3(0.0f, 0.0f, 0.0f),  // looking at 
         glm::vec3(0.0f, 1.0f, 0.0f)   // up vector
     );
@@ -1764,9 +1860,10 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
         throw std::runtime_error("Could not begin command buffer!");
     }
 
-    VkClearValue clearColor;
+    VkClearValue clearValue[2];
 
-    clearColor.color = { 0.0, 0.0f, 0.0f, 1.0f};
+    clearValue[0].color = {0.0, 0.0f, 0.0f, 1.0f};
+    clearValue[1].depthStencil = {1.0f, 0};
 
     VkRenderPassBeginInfo rpBeginInfo {
         VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -1774,8 +1871,8 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
         renderPass,
         swapChainFramebufferVec[imageIndex],
         {{0, 0}, {swapChainImageExtent.width, swapChainImageExtent.height}},
-        1,
-        &clearColor
+        2,
+        clearValue
     };
 
     VkViewport vp {
@@ -1996,12 +2093,17 @@ void Harmony::CopyBufferToImage(VkCommandBuffer cmdBuffer, VkBuffer src, VkImage
     vkCmdCopyBufferToImage(cmdBuffer, src, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
-void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, VkImageLayout oldLayout, VkImageLayout newLayout) {
     VkPipelineStageFlags srcStageFlags = 0;
     VkPipelineStageFlags dstStageFlags = 0;
 
+    auto flags = aspectFlags;
+    if (HasStencilComponent(format)) {
+        flags |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+
     VkImageSubresourceRange range {
-        VK_IMAGE_ASPECT_COLOR_BIT,
+        flags,
         0, // mip
         1, // count
         0, // array
@@ -2028,6 +2130,13 @@ void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat
         srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dstStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
+    else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    }
     else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -2045,7 +2154,7 @@ void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat
         1, &barrier);
 }
 
-Harmony::ImageInfo Harmony::CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, uint32_t width, uint32_t height) {
+Harmony::ImageInfo Harmony::CreateImage(VkFormat format, VkImageTiling tiling, VkImageUsageFlags usageFlags, VkMemoryPropertyFlags memPropFlags, VkImageAspectFlags aspectFlags, uint32_t width, uint32_t height) {
     VkDeviceMemory memory;
     VkImage        image;
     VkResult       result;
@@ -2093,7 +2202,7 @@ Harmony::ImageInfo Harmony::CreateImage(VkFormat format, VkImageTiling tiling, V
         throw std::runtime_error("Could not bind image memory!");
     }
 
-    return {image, memory, CreateImageView(image, format) };
+    return {image, memory, CreateImageView(image, format, aspectFlags) };
 }
 
 void Harmony::DestroyImage(ImageInfo& imgInfo, bool defer) {
@@ -2175,7 +2284,7 @@ void Harmony::EndOneTimeCommands(VkCommandBuffer cmdBuffer) {
     vkFreeCommandBuffers(device, commandPoolTx, 1, &cmdBuffer);
 }
 
-VkImageView Harmony::CreateImageView(VkImage image, VkFormat imageFormat) {
+VkImageView Harmony::CreateImageView(VkImage image, VkFormat imageFormat, VkImageAspectFlags aspectFlags) {
     VkImageView imageView;
     VkResult result;
 
@@ -2184,10 +2293,10 @@ VkImageView Harmony::CreateImageView(VkImage image, VkFormat imageFormat) {
         nullptr,
         0,
         image,
-        VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+        VK_IMAGE_VIEW_TYPE_2D,
         imageFormat,
         { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY },
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        { aspectFlags, 0, 1, 0, 1 }
     };
 
     result = vkCreateImageView(device, &createInfo, nullptr, &imageView);
@@ -2196,6 +2305,23 @@ VkImageView Harmony::CreateImageView(VkImage image, VkFormat imageFormat) {
     }
 
     return imageView;
+}
+
+VkFormat Harmony::findSuitableFormat(const std::vector<VkFormat>& formats, const VkImageTiling tiling, VkFormatFeatureFlags const features) {
+    for (VkFormat fmt : formats) {
+        VkFormatProperties props;
+
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, fmt, &props);
+
+        if (tiling == VK_IMAGE_TILING_LINEAR && ((props.linearTilingFeatures & features) == features)) {
+            return fmt;
+        }
+        else if(tiling == VK_IMAGE_TILING_OPTIMAL && ((props.optimalTilingFeatures & features) == features)) {
+            return fmt;
+        }
+    }
+
+    throw std::runtime_error("Could not find suitable format!");
 }
 
 void Harmony::OnWindowSizeChanged() {
@@ -2210,11 +2336,14 @@ void Harmony::OnWindowSizeChanged() {
             vkDestroyImageView(device, swapChainImageViewVec[i], nullptr);
         }
 
+        vkDestroyImageView(device, depthInfo.view, nullptr);
+
         vkDestroySwapchainKHR(device, swapchain, nullptr);
     }
 
     CreateSwapChain();
     CreateImageViews();
+    CreateDepthImageAndView();
     CreateFrameBuffers();
 
     windowResized = VK_FALSE;
