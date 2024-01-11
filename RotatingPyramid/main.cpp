@@ -26,6 +26,8 @@
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
+#define __DUMP_SHADER_INFO__    0
+
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Vertex {
@@ -263,6 +265,9 @@ private:
     VkDescriptorPool         descriptorPool      = VK_NULL_HANDLE;
     VkSampler                sampler             = VK_NULL_HANDLE;
 
+    PFN_vkGetPipelineExecutablePropertiesKHR  vkGetPipelineExecutableProperties = VK_NULL_HANDLE;
+    PFN_vkGetPipelineExecutableInternalRepresentationsKHR vkGetPipelineExecutableInternalRepresentations = VK_NULL_HANDLE;
+
     VkBool32                 windowResized       = VK_FALSE;
 
     uint64_t                 currentFrame        = 0;
@@ -293,6 +298,8 @@ private:
     VkFormat                 swapChainImageFormat;
     VkFormat                 depthFormat;
     VkExtent2D               swapChainImageExtent;
+
+    
 
 #ifdef _DEBUG
     static inline const bool enableValidationLayers = true;
@@ -667,7 +674,8 @@ void Harmony::ChoosePhysicalDevice() {
     VkResult result;
 
     std::vector<const char*> requiredExtensions = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
     };
 
     // queue family lambda
@@ -717,14 +725,20 @@ void Harmony::ChoosePhysicalDevice() {
 
     // device rate lambda
     auto rateDevice = [&](VkPhysicalDevice pd, QueueFamilyIndices& indices, VkPhysicalDeviceProperties2 &props, VkPhysicalDeviceFeatures2 &feats) -> int {
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR plExecFeats {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+            nullptr,
+            0
+        };
+
         VkPhysicalDeviceProperties2 deviceProps {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            nullptr
+            nullptr,
         };
 
         VkPhysicalDeviceFeatures2   deviceFeats {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-            nullptr
+            &plExecFeats,
         };
 
         uint32_t                    itemCount = 0;
@@ -775,6 +789,10 @@ void Harmony::ChoosePhysicalDevice() {
         vkGetPhysicalDeviceFeatures2(pd, &deviceFeats);
         if (deviceFeats.features.multiDrawIndirect) {
             score += 200;
+        }
+
+        if (plExecFeats.pipelineExecutableInfo == VK_FALSE) {
+            score = 0;
         }
 
         props = deviceProps;
@@ -828,7 +846,8 @@ void Harmony::CreateLogicalDevice() {
     VkResult result;
 
     std::vector<const char*> requiredExtensions = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
     };
 
     float queuePriority = 1.0f;
@@ -854,9 +873,15 @@ void Harmony::CreateLogicalDevice() {
         );
     }
 
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR plFeats {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+        nullptr,
+        VK_TRUE
+    };
+
     VkDeviceCreateInfo deviceCreateInfo {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        nullptr,
+        &plFeats,
         0,                           // no flags
         static_cast<uint32_t>(queueCreateInfoVec.size()),
         queueCreateInfoVec.data(),   // queues
@@ -880,6 +905,9 @@ void Harmony::CreateLogicalDevice() {
 
     vkGetDeviceQueue(device, choosenQueueIndices.graphicsFamily.value(), 0, &graphicsQueue);
     vkGetDeviceQueue(device, choosenQueueIndices.presentFamily.value(), 0, &presentQueue);
+
+    this->vkGetPipelineExecutableProperties = (PFN_vkGetPipelineExecutablePropertiesKHR)vkGetDeviceProcAddr(device, "vkGetPipelineExecutablePropertiesKHR");
+    this->vkGetPipelineExecutableInternalRepresentations = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)vkGetDeviceProcAddr(device, "vkGetPipelineExecutableInternalRepresentationsKHR");
 }
 
 void Harmony::CreateSwapChain() {
@@ -1760,10 +1788,15 @@ void Harmony::CreateGraphicsPipeline() {
         }
     );
 
+    VkPipelineCreateFlags plFlags = 0;
+#ifdef __DUMP_SHADER_INFO__
+    plFlags |= VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+#endif
+
     VkGraphicsPipelineCreateInfo pipelineCreateInfo {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         nullptr,
-        0,
+        plFlags,
         2,
         shaderStagesCreateInfos,
         &vfStateCreateInfo,
@@ -1786,6 +1819,63 @@ void Harmony::CreateGraphicsPipeline() {
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Could not create graphics pipeline!");
     }
+
+#ifdef __DUMP_SHADER_INFO__
+    // executable properties
+    {
+        VkPipelineInfoKHR plInfo {
+            VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR,
+            nullptr,
+            graphicsPipeline
+        };
+
+        VkPipelineExecutablePropertiesKHR plProps {
+            VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR,
+            nullptr,
+        };
+
+        uint32_t executableCount = 0;
+
+        vkGetPipelineExecutableProperties(device, &plInfo, &executableCount, nullptr);
+
+        std::cout << "Num executables: " << executableCount << std::endl;
+        if (executableCount > 0) {
+            std::vector<VkPipelineExecutablePropertiesKHR> plPropsVec(executableCount);
+            for (auto& p : plPropsVec) {
+                p.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR;
+            }
+            
+            vkGetPipelineExecutableProperties(device, &plInfo, &executableCount, plPropsVec.data());
+            for (uint32_t i = 0; i < executableCount; ++i) {
+                VkPipelineExecutableInfoKHR info {
+                    VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+                    nullptr,
+                    graphicsPipeline,
+                    i
+                };
+
+                uint32_t irCount = 0;
+                this->vkGetPipelineExecutableInternalRepresentations(device, &info, &irCount, nullptr);
+                if( irCount > 0 ) {
+                    std::vector<VkPipelineExecutableInternalRepresentationKHR> irVec(irCount);
+                    for (auto& x : irVec) {
+                        x.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR;
+                    }
+
+                    this->vkGetPipelineExecutableInternalRepresentations(device, &info, &irCount, irVec.data());
+                    for (auto& x : irVec) {
+                        std::cout << plPropsVec[i].description << ", " << x.name << ", " << x.description << std::endl;
+
+                        if (x.isText) {
+                            std::string_view view(reinterpret_cast<const char *>(x.pData), x.dataSize);
+                            std::cout << view << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif // !__DUMP_SHADER_INFO__
 
     deletionQueue.Append(
         [ cdevice = device
