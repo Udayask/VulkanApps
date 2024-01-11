@@ -26,8 +26,6 @@
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
-#define __DUMP_SHADER_INFO__    0
-
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Vertex {
@@ -783,16 +781,20 @@ void Harmony::ChoosePhysicalDevice() {
         }
 
         if (deviceProps.properties.limits.maxPushConstantsSize < sizeof(PushConstant)) {
-            score = 0;
+            return 0;
+        }
+
+        // we need VK 1.3 for dynamic rendering
+        uint32_t major = VK_API_VERSION_MAJOR(deviceProps.properties.apiVersion);
+        uint32_t minor = VK_API_VERSION_MINOR(deviceProps.properties.apiVersion);
+
+        if (major != 1 && minor < 3) {
+            return 0;
         }
 
         vkGetPhysicalDeviceFeatures2(pd, &deviceFeats);
         if (deviceFeats.features.multiDrawIndirect) {
             score += 200;
-        }
-
-        if (plExecFeats.pipelineExecutableInfo == VK_FALSE) {
-            score = 0;
         }
 
         props = deviceProps;
