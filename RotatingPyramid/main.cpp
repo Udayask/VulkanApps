@@ -297,8 +297,6 @@ private:
     VkFormat                 depthFormat;
     VkExtent2D               swapChainImageExtent;
 
-    
-
 #ifdef _DEBUG
     static inline const bool enableValidationLayers = true;
 #else
@@ -389,7 +387,7 @@ bool Harmony::Init(HINSTANCE hinstance) {
 
         CreateDepthImageAndView();
 
-        CreateRenderPass();
+        // CreateRenderPass();
 
         ////////////////////////////////////
         // resources
@@ -409,7 +407,7 @@ bool Harmony::Init(HINSTANCE hinstance) {
 
         CreateUniformBuffer();
 
-        CreateFrameBuffers();
+        // CreateFrameBuffers();
 
         CreateDescriptorSetLayout();
 
@@ -673,7 +671,8 @@ void Harmony::ChoosePhysicalDevice() {
 
     std::vector<const char*> requiredExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
+        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
     };
 
     // queue family lambda
@@ -804,7 +803,7 @@ void Harmony::ChoosePhysicalDevice() {
     };
 
     result = vkEnumeratePhysicalDevices(instance, &itemCount, nullptr);
-    if ((result != VK_SUCCESS) || itemCount == 0) {
+    if ((result != VK_SUCCESS) || itemCount == 0 ) {
         throw std::runtime_error("Could not find amy Vulkan capble GPU!");
     }
 
@@ -828,8 +827,9 @@ void Harmony::ChoosePhysicalDevice() {
         VkPhysicalDeviceFeatures2 feats{};
 
         int score = rateDevice(physicalDevice, indices, props, feats);
-
-        deviceMap[score] = { physicalDevice, props, feats, indices };
+        if( score ) {
+            deviceMap[score] = { physicalDevice, props, feats, indices };
+        }
     }
 
     if (deviceMap.empty()) {
@@ -849,7 +849,8 @@ void Harmony::CreateLogicalDevice() {
 
     std::vector<const char*> requiredExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME
+        VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
     };
 
     float queuePriority = 1.0f;
@@ -881,9 +882,15 @@ void Harmony::CreateLogicalDevice() {
         VK_TRUE
     };
 
+    VkPhysicalDeviceDynamicRenderingFeatures dynRenderingFeats {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+        &plFeats,
+        VK_TRUE
+    };
+
     VkDeviceCreateInfo deviceCreateInfo {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        &plFeats,
+        &dynRenderingFeats,
         0,                           // no flags
         static_cast<uint32_t>(queueCreateInfoVec.size()),
         queueCreateInfoVec.data(),   // queues
@@ -1795,9 +1802,23 @@ void Harmony::CreateGraphicsPipeline() {
     plFlags |= VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
 #endif
 
+    VkPipelineRenderingCreateInfo plRenderingInfo {
+        VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        nullptr,
+        0,
+        1,
+        &swapChainImageFormat,
+        depthFormat,
+        VK_FORMAT_UNDEFINED
+    };
+
+    if (HasStencilComponent(depthFormat) ) {
+        plRenderingInfo.stencilAttachmentFormat = depthFormat;
+    }
+
     VkGraphicsPipelineCreateInfo pipelineCreateInfo {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        nullptr,
+        &plRenderingInfo,
         plFlags,
         2,
         shaderStagesCreateInfos,
@@ -1811,7 +1832,7 @@ void Harmony::CreateGraphicsPipeline() {
         &cbStateCreateInfo,
         &dynStateCreateInfo,
         pipelineLayout,
-        renderPass,
+        VK_NULL_HANDLE,
         0,
         VK_NULL_HANDLE,
         -1
@@ -1957,16 +1978,49 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
     clearValue[0].color = {0.0, 0.0f, 0.0f, 1.0f};
     clearValue[1].depthStencil = {1.0f, 0};
 
-    VkRenderPassBeginInfo rpBeginInfo {
-        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    VkRenderingAttachmentInfo colorAttachmentInfo {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         nullptr,
-        renderPass,
-        swapChainFramebufferVec[imageIndex],
-        {{0, 0}, {swapChainImageExtent.width, swapChainImageExtent.height}},
-        2,
-        clearValue
+        swapChainImageViewVec[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        clearValue[0]
     };
 
+    VkRenderingAttachmentInfo depthAttachmentInfo {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        depthInfo.view,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        clearValue[1]
+    };
+
+    VkRenderingInfo renderInfo {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,
+        VkRect2D{ VkOffset2D{}, VkExtent2D{swapChainImageExtent.width, swapChainImageExtent.height}},
+        1,
+        0,
+        1,
+        &colorAttachmentInfo,
+        &depthAttachmentInfo,
+        nullptr,
+    };
+
+    if (HasStencilComponent(depthFormat)) {
+        renderInfo.pStencilAttachment = &depthAttachmentInfo;
+    }
+    
     VkViewport vp {
         0.0f,
         0.0f,
@@ -1983,7 +2037,10 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
         swapChainImageExtent.height,
     };
 
-    vkCmdBeginRenderPass(cmdBuffer, &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    TransitionImage(cmdBuffer, swapChainImageVec[imageIndex],  swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    TransitionImage(cmdBuffer, depthInfo.image, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    vkCmdBeginRendering(cmdBuffer, &renderInfo);
 
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
@@ -2002,7 +2059,9 @@ void Harmony::RecordCommandBuffer(VkCommandBuffer cmdBuffer, uint32_t imageIndex
 
     vkCmdDrawIndexed(cmdBuffer, 12, 1, 0, 0, 0);
 
-    vkCmdEndRenderPass(cmdBuffer);
+    vkCmdEndRendering(cmdBuffer);
+
+    TransitionImage(cmdBuffer, swapChainImageVec[imageIndex],  swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     result = vkEndCommandBuffer(cmdBuffer);
     if (result != VK_SUCCESS) {
@@ -2222,19 +2281,33 @@ void Harmony::TransitionImage(VkCommandBuffer cmdBuffer, VkImage image, VkFormat
         srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dstStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
+    else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        srcStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    }
     else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
         srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        dstStageFlags = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     }
-    else if(oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        
-        srcStageFlags = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dstStageFlags = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        srcStageFlags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+    else if(oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = 0;
+
+        srcStageFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dstStageFlags = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     }
 
     vkCmdPipelineBarrier(cmdBuffer,
