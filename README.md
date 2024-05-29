@@ -13,6 +13,3 @@ Starts off with Vulkan-Tutorial.com based code adapted to run natively on Window
 
 Renderdoc is a very useful tool for debugging vulkan applications. One can use Flycam mode in MeshViewer and inspect what falls within frustum.
 
-![Rotating Pyramid Rdoc](Images/RotatingPyramidRdoc.png)
-
-![FinalImage](Images/TexturedPyramid.png)
